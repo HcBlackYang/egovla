@@ -93,22 +93,30 @@ class RobotPolicySystem:
                 new_actions = inference_results["actions"][0] # 拿到 [16, 8] 的 list
                 
                 # --- 阶段 B: 执行动作序列 ---
-                for action in new_actions:
+                for i, action in enumerate(new_actions):
                     t_step_start = time.time()
                     
                     target_joints = action[:-1]
                     gripper_val = action[-1]
                     
-                    # 使用异步执行，并通过 sleep 控制节奏
+                    # A. 关节控制 (异步执行，平滑过渡)
                     self.robot_env.step(target_joints, asynchronous=True)
                     
-                    # 夹爪逻辑 (保留) ...
+                    # B. 夹爪控制
+                    # 简单的状态机逻辑，防止每一帧都发指令
+                    if gripper_val > 0.06: 
+                         if self.gripper_status["current_state"] != -1:
+                             self.robot_env.open_gripper(asynchronous=True)
+                             self.gripper_status["current_state"] = -1
+                    elif gripper_val < 0.02:
+                         if self.gripper_status["current_state"] != 1:
+                             self.robot_env.close_gripper(asynchronous=True)
+                             self.gripper_status["current_state"] = 1
                     
-                    # 强制控制频率，例如 15Hz (0.066s) 或 20Hz (0.05s)
-                    # RDT 预测的动作间隔取决于训练数据的频率
-                    # 假设训练数据是 20Hz，这里就 sleep 0.05
+                    # C. 频率控制 (20Hz = 0.05s)
+                    # 减去推理和通信的时间开销，确保动作播放是匀速的
                     dt = time.time() - t_step_start
-                    remain = 0.033 - dt
+                    remain = 0.033 - dt # 调整为您的训练频率 (例如 20Hz)
                     if remain > 0: time.sleep(remain)
 
 
