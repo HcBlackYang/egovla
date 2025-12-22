@@ -96,7 +96,8 @@ class RDTWrapper(nn.Module):
     def __init__(self, 
                  action_dim=8, 
                  model_path='/yanghaochuan/models/rdt-1b',
-                 rdt_cond_dim=1152):
+                 rdt_cond_dim=1152,
+                 pred_horizon=16):
         super().__init__()
         if ModelClass is None: raise RuntimeError("无法初始化 RDT")
 
@@ -222,8 +223,8 @@ class RDTWrapper(nn.Module):
         args.embed_dim = self.rdt_hidden_size 
         args.d_model = self.rdt_hidden_size
         
-        args.horizon = 1
-        args.pred_horizon = 1
+        args.horizon = int(pred_horizon)      # 预测未来多少步
+        args.pred_horizon = int(pred_horizon)
         
         defaults = {'patch_size': 1, 'img_size': 1, 'num_frames': 1}
         for k, v in defaults.items():
@@ -231,28 +232,99 @@ class RDTWrapper(nn.Module):
             
         return args
 
-    def forward(self, noisy_action, timestep, conditions):
-        e_t = conditions['e_t']
-        cond_embeds = self.cond_proj(e_t).unsqueeze(1) # [B, 1, D]
+    # def forward(self, noisy_action, timestep, conditions):
+    #     e_t = conditions['e_t']
+    #     cond_embeds = self.cond_proj(e_t).unsqueeze(1) # [B, 1, D]
         
-        if noisy_action.dim() == 2: x_in = noisy_action
-        else: x_in = noisy_action.squeeze(1)
+    #     if noisy_action.dim() == 2: x_in = noisy_action
+    #     else: x_in = noisy_action.squeeze(1)
             
-        x_embed = self.action_proj(x_in).unsqueeze(1) # [B, 1, D]
+    #     x_embed = self.action_proj(x_in).unsqueeze(1) # [B, 1, D]
         
-        B = x_embed.shape[0]
-        device = x_embed.device
+    #     B = x_embed.shape[0]
+    #     device = x_embed.device
         
-        freq = torch.full((B,), 30, device=device, dtype=torch.long)
+    #     freq = torch.full((B,), 30, device=device, dtype=torch.long)
         
-        lang_c = cond_embeds 
+    #     lang_c = cond_embeds 
         
-        # 图像条件：全 0 占位符 (长度为 2)
-        img_c = torch.zeros((B, 2, cond_embeds.shape[-1]), device=device, dtype=cond_embeds.dtype)
+    #     # 图像条件：全 0 占位符 (长度为 2)
+    #     img_c = torch.zeros((B, 2, cond_embeds.shape[-1]), device=device, dtype=cond_embeds.dtype)
         
-        lang_mask = torch.ones((B, 1), device=device, dtype=torch.bool)
-        img_mask = torch.ones((B, 2), device=device, dtype=torch.bool)
+    #     lang_mask = torch.ones((B, 1), device=device, dtype=torch.bool)
+    #     img_mask = torch.ones((B, 2), device=device, dtype=torch.bool)
 
+    #     return self.rdt_model(
+    #         x=x_embed, 
+    #         freq=freq, 
+    #         t=timestep, 
+    #         lang_c=lang_c, 
+    #         img_c=img_c,
+    #         lang_mask=lang_mask,
+    #         img_mask=img_mask
+    #     )
+
+
+    def forward(self, noisy_action, timestep, conditions):
+        """
+        RDTWrapper 的前向传播 (修改版)
+        输入:
+            noisy_action: [B, Horizon, Action_Dim] (例如 [B, 16, 8])
+            timestep: [B]
+            conditions: dict, 包含 'e_t' (序列特征)
+        """
+        # 1. 获取视觉序列特征
+        e_t = conditions['e_t'] # 期望形状: [B, 64, 768] (来自 FusionEncoder 的序列输出)
+        
+        B = e_t.shape[0]
+        device = e_t.device
+        dtype = e_t.dtype
+        
+        # 2. 视觉投影 (768 -> RDT Hidden Size, 通常是 1152)
+        # 动态检查并初始化投影层 (Lazy Initialization)，防止 __init__ 没改导致报错
+        # 推荐您后续最好把它移到 __init__ 里: self.visual_proj = nn.Linear(768, 1152)
+        if not hasattr(self, 'visual_proj'):
+            # RDT-1B 的 hidden_size 通常是 2048 (InternViT) 或 1152 (SigLIP/Patch)
+            # 这里我们需要映射到 model.img_embedder 期望的维度
+            # 简单起见，我们读取 self.rdt_model.config.hidden_size 或直接硬编码 1152 (常见配置)
+            # 更稳妥的方式是看 img_c 应该进哪里。RDT 内部通常有 img_adaptor。
+            # 这里假设 RDT 内部 img_c 的期望维度是 1152 (SigLIP-So400m 的 dim)
+            target_dim = 1152 
+            print(f"[RDTWrapper] Lazy initializing visual_proj: {e_t.shape[-1]} -> {target_dim}")
+            self.visual_proj = nn.Linear(e_t.shape[-1], target_dim).to(device).to(dtype)
+        
+        # [B, 64, 768] -> [B, 64, 1152]
+        img_c = self.visual_proj(e_t)
+        
+        # 3. 构造文本条件 (Language Condition)
+        # 因为我们主要依赖视觉，这里传入空的文本嵌入 (Zero Padding)
+        # RDT 期望 lang_c 形状为 [B, L, D]，这里设 L=1
+        lang_c = torch.zeros((B, 1, 1152), device=device, dtype=dtype)
+        
+        # 4. 构造 Masks
+        # img_mask: [B, 64], 全 1 (所有视觉 Token 有效)
+        img_mask = torch.ones((B, img_c.shape[1]), device=device, dtype=torch.long)
+        
+        # lang_mask: [B, 1], 全 1 (表示这是一个有效的"空指令")
+        # 注意: RDT 内部对 mask 的处理通常是 bool 或 0/1, long 比较稳妥
+        lang_mask = torch.ones((B, 1), device=device, dtype=torch.long)
+
+        # 5. 处理动作输入
+        # 如果输入是 [B, 8]，unsqueeze 成 [B, 1, 8]
+        # 如果是 [B, 16, 8]，保持不变
+        if noisy_action.dim() == 2:
+            x_in = noisy_action.unsqueeze(1)
+        else:
+            x_in = noisy_action
+            
+        # 投影动作维度 [B, H, 8] -> [B, H, Hidden]
+        x_embed = self.action_proj(x_in)
+        
+        # 6. 控制频率 (Control Frequency)
+        # 固定为 30Hz 或从 dataset 统计中获取
+        freq = torch.full((B,), 30, device=device, dtype=torch.long)
+
+        # 7. 调用 RDT Backbone
         return self.rdt_model(
             x=x_embed, 
             freq=freq, 

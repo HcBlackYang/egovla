@@ -154,14 +154,79 @@ class FusionEncoder(nn.Module):
         except TypeError:
             return self.backbone(inputs)
 
+    # def forward(self, video_frames, text_tokens, state_info, first_frame_summary):
+    #     if video_frames.shape[1] != 3 and video_frames.shape[2] == 3:
+    #         video_frames = video_frames.permute(0, 2, 1, 3, 4)
+    #     T_video = video_frames.shape[2]
+
+    #     tokens = self.extract_features(video_frames)
+    #     if tokens.dim() == 2: tokens = tokens.unsqueeze(1) 
+
+    #     if self.text_encoder is not None:
+    #         with torch.no_grad():
+    #             text_outputs = self.text_encoder(input_ids=text_tokens)
+    #             text_embeds = text_outputs.last_hidden_state
+    #         text_cond = text_embeds.mean(dim=1) 
+    #     else:
+    #         text_embeds = torch.zeros(tokens.shape[0], 10, 1024, device=tokens.device)
+    #         text_cond = torch.zeros(tokens.shape[0], 1024, device=tokens.device)
+
+    #     tokens = self.film_t5(tokens, text_cond)
+    #     state_cond = state_info[:, -1, :] 
+    #     tokens = self.film_state(tokens, state_cond)
+
+    #     if first_frame_summary.dim() == 5:
+    #         ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, T_video, 1, 1)
+    #         with torch.no_grad():
+    #             ff_tokens = self.extract_features(ff_input)
+    #             if ff_tokens.dim() == 3: first_frame_summary = ff_tokens.mean(dim=1, keepdim=True)
+    #             elif ff_tokens.dim() == 2: first_frame_summary = ff_tokens.unsqueeze(1)
+
+    #     attn_output, _ = self.cross_attention_first_frame(query=tokens, key=first_frame_summary, value=first_frame_summary)
+    #     tokens = self.norm1(tokens + attn_output)
+
+    #     task_slots, confidence, background_context = self.routing_layer(tokens, first_frame_summary, text_embeds)
+
+    #     global_rep = torch.mean(tokens, dim=1)
+    #     semantic_out = self.semantic_align_head(global_rep)
+    #     temporal_out = self.temporal_align_head(global_rep)
+
+    #     weighted_task = torch.sum(task_slots * confidence, dim=1)
+    #     fused = self.norm2(global_rep + weighted_task)
+    #     e_t = self.projection_head(fused)
+
+    #     return {
+    #         "e_t": e_t,
+    #         "task_slots": task_slots,
+    #         "task_confidence": confidence,
+    #         "background_context": background_context,
+    #         "semantic_head_output": semantic_out,
+    #         "temporal_head_output": temporal_out
+    #     }
+
     def forward(self, video_frames, text_tokens, state_info, first_frame_summary):
+        # 1. 调整维度 [B, C, T, H, W] -> [B, T, C, H, W] 
+
+        B_dim = video_frames.shape[0]
+        is_dual_view = False
+        
+        if video_frames.dim() == 6: # [B, V, C, T, H, W]
+            is_dual_view = True
+            B, V, C, T, H, W = video_frames.shape
+            # 合并 Batch 和 View 维度: [B*V, C, T, H, W]
+            video_frames = video_frames.view(B * V, C, T, H, W)
+
         if video_frames.shape[1] != 3 and video_frames.shape[2] == 3:
             video_frames = video_frames.permute(0, 2, 1, 3, 4)
         T_video = video_frames.shape[2]
 
+        # 2. 提取基础特征
+        # tokens shape: [B, N_patches, D] (例如 [B, 1568, 1152])
         tokens = self.extract_features(video_frames)
-        if tokens.dim() == 2: tokens = tokens.unsqueeze(1) 
-
+        # if tokens.dim() == 2: tokens = tokens.unsqueeze(1) 
+        if is_dual_view:
+            tokens = tokens.view(B, V * tokens.shape[1], tokens.shape[2])
+        # 3. 文本编码 (Text Embedding)
         if self.text_encoder is not None:
             with torch.no_grad():
                 text_outputs = self.text_encoder(input_ids=text_tokens)
@@ -171,35 +236,55 @@ class FusionEncoder(nn.Module):
             text_embeds = torch.zeros(tokens.shape[0], 10, 1024, device=tokens.device)
             text_cond = torch.zeros(tokens.shape[0], 1024, device=tokens.device)
 
+        # 4. FiLM 调节 (Conditioning)
         tokens = self.film_t5(tokens, text_cond)
         state_cond = state_info[:, -1, :] 
         tokens = self.film_state(tokens, state_cond)
 
+        # 5. 首帧注意力 (First Frame Cross-Attention)
         if first_frame_summary.dim() == 5:
             ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, T_video, 1, 1)
             with torch.no_grad():
                 ff_tokens = self.extract_features(ff_input)
+                # 处理首帧特征维度
                 if ff_tokens.dim() == 3: first_frame_summary = ff_tokens.mean(dim=1, keepdim=True)
                 elif ff_tokens.dim() == 2: first_frame_summary = ff_tokens.unsqueeze(1)
 
         attn_output, _ = self.cross_attention_first_frame(query=tokens, key=first_frame_summary, value=first_frame_summary)
         tokens = self.norm1(tokens + attn_output)
 
+        # 6. 任务路由 (Task Routing)
         task_slots, confidence, background_context = self.routing_layer(tokens, first_frame_summary, text_embeds)
-
-        global_rep = torch.mean(tokens, dim=1)
-        semantic_out = self.semantic_align_head(global_rep)
-        temporal_out = self.temporal_align_head(global_rep)
-
+        
+        # weighted_task: [B, D]
         weighted_task = torch.sum(task_slots * confidence, dim=1)
-        fused = self.norm2(global_rep + weighted_task)
-        e_t = self.projection_head(fused)
+        
+        # === 核心修改区域 (Critical Changes) ===
+
+        # 新逻辑: 保持序列 (Keep Sequence)
+        # 将 weighted_task 广播到序列的每一步: [B, D] -> [B, 1, D]
+        fused_seq = self.norm2(tokens + weighted_task.unsqueeze(1))
+        
+        # 投影整个序列: [B, N_patches, D] -> [B, N_patches, rdt_dim]
+        e_t_full = self.projection_head(fused_seq)
+        
+        # 自适应池化 (Adaptive Pooling): 将过长的序列压缩到固定长度 64
+        # [B, N, D] -> Permute -> [B, D, N] -> AdaptivePool -> [B, D, 64] -> Permute -> [B, 64, D]
+        # 64 是一个经验值，既保留了足够的时空细节，又不会让 RDT 计算过载
+        e_t = torch.nn.functional.adaptive_avg_pool1d(e_t_full.transpose(1, 2), 64).transpose(1, 2)
+        
+        # 计算用于辅助Loss的全局特征 (Auxiliary Heads)
+        # 这里使用 mean pooling 是为了对齐 Teacher 的维度 (如果是全局对齐 Loss)
+        # 如果您的 Loss 是序列对序列的，这里也应该输出序列
+        global_rep_for_heads = tokens.mean(dim=1)
+        semantic_out = self.semantic_align_head(global_rep_for_heads)
+        temporal_out = self.temporal_align_head(global_rep_for_heads)
 
         return {
-            "e_t": e_t,
+            "e_t": e_t, # [B, 64, 768] (Sequence Output for RDT)
             "task_slots": task_slots,
             "task_confidence": confidence,
             "background_context": background_context,
-            "semantic_head_output": semantic_out,
-            "temporal_head_output": temporal_out
+            "semantic_head_output": semantic_out, # [B, Teacher_Dim]
+            "temporal_head_output": temporal_out  # [B, Teacher_Dim]
         }
