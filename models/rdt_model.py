@@ -1,0 +1,264 @@
+# models/rdt_model.py
+import torch
+import torch.nn as nn
+import os
+import sys
+import json
+import yaml
+import importlib.util
+import inspect
+import numbers
+
+# =========================================================================
+# 1. 强力参数清洗工具 & 补丁
+# =========================================================================
+def force_to_int(val):
+    try:
+        if val is None: return None
+        if isinstance(val, (tuple, list)):
+            val = val[0] if len(val) >= 1 else 0
+        if hasattr(val, 'item'): val = val.item()
+        if hasattr(val, 'dtype'): val = int(val)
+        if isinstance(val, float): val = int(val)
+        if isinstance(val, int): return val
+        try: return int(val)
+        except: return val 
+    except:
+        return val
+
+OriginalLinearInit = torch.nn.Linear.__init__
+def patched_linear_init(self, in_features, out_features, bias=True, device=None, dtype=None):
+    safe_in = force_to_int(in_features)
+    safe_out = force_to_int(out_features)
+    if not isinstance(safe_out, int):
+        try: safe_out = int(safe_out.out_channels) 
+        except: safe_out = 8 
+    OriginalLinearInit(self, safe_in, safe_out, bias=bias, device=device, dtype=dtype)
+torch.nn.Linear.__init__ = patched_linear_init
+
+try:
+    import timm.models.layers
+    if hasattr(timm.models.layers, 'Mlp'):
+        OriginalTimmMlpInit = timm.models.layers.Mlp.__init__
+        def patched_timm_init(self, in_features, hidden_features=None, out_features=None, *args, **kwargs):
+            return OriginalTimmMlpInit(self, force_to_int(in_features), force_to_int(hidden_features), force_to_int(out_features), *args, **kwargs)
+        timm.models.layers.Mlp.__init__ = patched_timm_init
+except: pass
+
+try:
+    import timm.layers
+    if hasattr(timm.layers, 'Mlp'):
+        OriginalLayerMlpInit = timm.layers.Mlp.__init__
+        def patched_layer_init(self, in_features, hidden_features=None, out_features=None, *args, **kwargs):
+            return OriginalLayerMlpInit(self, force_to_int(in_features), force_to_int(hidden_features), force_to_int(out_features), *args, **kwargs)
+        timm.layers.Mlp.__init__ = patched_layer_init
+except: pass
+
+# =========================================================================
+# 2. 加载 RDT 源码
+# =========================================================================
+RDT_ROOT = "/yanghaochuan/projects/RoboticsDiffusionTransformer"
+RDT_MODELS_DIR = os.path.join(RDT_ROOT, "models")
+
+if RDT_ROOT not in sys.path: sys.path.insert(0, RDT_ROOT)
+if RDT_MODELS_DIR not in sys.path: sys.path.insert(0, RDT_MODELS_DIR)
+if "models" in sys.modules and RDT_MODELS_DIR not in sys.modules["models"].__path__:
+    sys.modules["models"].__path__.append(RDT_MODELS_DIR)
+
+TARGET_FILE_PATH = os.path.join(RDT_ROOT, "models", "rdt", "model.py")
+ModelClass = None
+if os.path.exists(TARGET_FILE_PATH):
+    try:
+        spec = importlib.util.spec_from_file_location("rdt_source_model", TARGET_FILE_PATH)
+        rdt_module = importlib.util.module_from_spec(spec)
+        sys.modules["rdt_source_model"] = rdt_module
+        spec.loader.exec_module(rdt_module)
+        
+        candidate_classes = []
+        for name, obj in inspect.getmembers(rdt_module):
+            if inspect.isclass(obj) and issubclass(obj, nn.Module):
+                if any(k in name for k in ["Transformer", "RDT", "Model"]):
+                    if not any(k in name for k in ["Layer", "Block", "Attention", "Embed", "Head", "MLP", "Timestep"]):
+                        candidate_classes.append(obj)
+        if candidate_classes:
+            candidate_classes.sort(key=lambda x: len(x.__name__), reverse=True)
+            ModelClass = candidate_classes[0]
+            print(f"[RDTWrapper] ✅ 成功锁定模型类: {ModelClass.__name__}")
+        else:
+            print(f"[RDTWrapper] ❌ 未找到主模型类")
+    except Exception as e:
+        print(f"[RDTWrapper] ❌ 导入 model.py 失败: {e}")
+
+# =========================================================================
+# 3. RDTWrapper 类定义
+# =========================================================================
+class RDTWrapper(nn.Module):
+    def __init__(self, 
+                 action_dim=8, 
+                 model_path='/yanghaochuan/models/rdt-1b',
+                 rdt_cond_dim=1152):
+        super().__init__()
+        if ModelClass is None: raise RuntimeError("无法初始化 RDT")
+
+        # 1. Config
+        config_path = os.path.join(model_path, "config.json")
+        if not os.path.exists(config_path): config_path = os.path.join(model_path, "config.yaml")
+        print(f"[RDTWrapper] Loading config from: {config_path}")
+        
+        self.rdt_hidden_size = 2048 
+        # 调用内部方法加载配置
+        args = self._load_config_and_override(config_path, action_dim)
+
+        # 2. Instantiate
+        print(f"[RDTWrapper] Instantiating with forced horizon={args.horizon}")
+        try:
+            sig = inspect.signature(ModelClass.__init__)
+            params = list(sig.parameters.keys())
+            if 'output_dim' not in vars(args): args.output_dim = args.action_dim
+            valid_args = {k: v for k, v in vars(args).items() if k in params or 'kwargs' in str(sig)}
+            self.rdt_model = ModelClass(**valid_args)
+            print("[RDTWrapper] Instantiation successful via kwargs unpacking.")
+        except Exception as e:
+            print(f"[RDTWrapper] Kwargs instantiation failed: {e}. Falling back to object pass...")
+            self.rdt_model = ModelClass(args)
+
+        # 3. Detect ACTUAL Hidden Size
+        actual_dim = self.rdt_hidden_size
+        if hasattr(self.rdt_model, 'hidden_size'): actual_dim = self.rdt_model.hidden_size
+        elif hasattr(self.rdt_model, 'embed_dim'): actual_dim = self.rdt_model.embed_dim
+        else:
+            for m in self.rdt_model.modules():
+                if isinstance(m, nn.Linear):
+                    actual_dim = m.out_features
+                    break
+        print(f"[RDTWrapper] 🔍 Detected Actual Hidden Dimension: {actual_dim}")
+        
+        # 4. Load Weights (Smart Loading with Adaptation)
+        weights_path = os.path.join(model_path, "pytorch_model.bin")
+        if not os.path.exists(weights_path): weights_path = os.path.join(model_path, "diffusion_pytorch_model.bin")
+        
+        if os.path.exists(weights_path):
+            print(f"[RDTWrapper] Loading weights with schema adaptation...")
+            try:
+                state_dict = torch.load(weights_path, map_location="cpu", weights_only=False)
+            except TypeError:
+                state_dict = torch.load(weights_path, map_location="cpu")
+            
+            new_state_dict = {}
+            current_model_dict = self.rdt_model.state_dict()
+            
+            for k, v in state_dict.items():
+                if k.startswith("module."): k = k[7:]
+                if k in current_model_dict:
+                    target_shape = current_model_dict[k].shape
+                    
+                    # === 适配 1: x_pos_embed (3 tokens vs 4 tokens) ===
+                    # 场景：官方权重有 State Token (len 4)，你的模型没有 (len 3)
+                    if "x_pos_embed" in k:
+                        if v.shape[1] == 4 and target_shape[1] == 3:
+                            print(f"[RDTWrapper] ✂️  Slicing x_pos_embed: Removing 'state' token (index 2).")
+                            # 官方顺序: [Time, Freq, State, Action] -> 保留 [0, 1, 3]
+                            v = v[:, [0, 1, 3], :]
+                    
+                    # === 适配 2: img_cond_pos_embed (4000+ vs 2) ===
+                    # 场景：官方权重巨大，我们只需要 2 个占位符
+                    if "img_cond_pos_embed" in k:
+                        if v.shape[1] > target_shape[1]:
+                            # 直接截取前 N 个，反正我们传的是全 0 占位符
+                            v = v[:, :target_shape[1], :]
+
+                    if v.shape != target_shape:
+                        # 兜底：如果形状还不匹配，跳过（防止报错）
+                        print(f"[RDTWrapper] ⚠️  Skipping {k}: shape mismatch {v.shape} vs {target_shape}")
+                        continue
+                        
+                    new_state_dict[k] = v
+            
+            self.rdt_model.load_state_dict(new_state_dict, strict=False)
+
+        # 5. Initialize Projection Layers
+        target_dim = actual_dim 
+        self.action_proj = nn.Linear(int(action_dim), int(target_dim))
+        self.cond_proj = nn.Linear(int(rdt_cond_dim), int(target_dim))
+
+        # === 适配 3: 强制调整模型内部 img_pos_embed 大小 ===
+        DUBBY_IMG_LEN = 2
+        if hasattr(self.rdt_model, 'img_cond_pos_embed'):
+             if self.rdt_model.img_cond_pos_embed.shape[1] > DUBBY_IMG_LEN:
+                 print(f"[RDTWrapper] 📉 Resizing internal img_cond_pos_embed to length {DUBBY_IMG_LEN}")
+                 old_pe = self.rdt_model.img_cond_pos_embed.data
+                 new_pe = nn.Parameter(old_pe[:, :DUBBY_IMG_LEN, :].clone())
+                 self.rdt_model.img_cond_pos_embed = new_pe
+
+    # =================================================
+    # 辅助方法：注意缩进，它必须在 class RDTWrapper 内部
+    # =================================================
+    def _load_config_and_override(self, config_path, target_action_dim):
+        class Args: pass
+        args = Args()
+        
+        if config_path and os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            
+            if 'rdt' in cfg and 'hidden_size' in cfg['rdt']:
+                self.rdt_hidden_size = int(cfg['rdt']['hidden_size'])
+            elif 'hidden_size' in cfg:
+                self.rdt_hidden_size = int(cfg['hidden_size'])
+                
+            for k, v in cfg.items():
+                if k == 'rdt' and isinstance(v, dict):
+                    for sub_k, sub_v in v.items():
+                        setattr(args, sub_k, sub_v)
+                setattr(args, k, v)
+                
+        args.action_dim = int(target_action_dim)
+        args.output_dim = int(target_action_dim)
+        args.out_channels = int(target_action_dim)
+        args.input_size = int(target_action_dim)
+        args.in_channels = int(target_action_dim)
+        
+        args.hidden_size = self.rdt_hidden_size
+        args.embed_dim = self.rdt_hidden_size 
+        args.d_model = self.rdt_hidden_size
+        
+        args.horizon = 1
+        args.pred_horizon = 1
+        
+        defaults = {'patch_size': 1, 'img_size': 1, 'num_frames': 1}
+        for k, v in defaults.items():
+            if not hasattr(args, k): setattr(args, k, v)
+            
+        return args
+
+    def forward(self, noisy_action, timestep, conditions):
+        e_t = conditions['e_t']
+        cond_embeds = self.cond_proj(e_t).unsqueeze(1) # [B, 1, D]
+        
+        if noisy_action.dim() == 2: x_in = noisy_action
+        else: x_in = noisy_action.squeeze(1)
+            
+        x_embed = self.action_proj(x_in).unsqueeze(1) # [B, 1, D]
+        
+        B = x_embed.shape[0]
+        device = x_embed.device
+        
+        freq = torch.full((B,), 30, device=device, dtype=torch.long)
+        
+        lang_c = cond_embeds 
+        
+        # 图像条件：全 0 占位符 (长度为 2)
+        img_c = torch.zeros((B, 2, cond_embeds.shape[-1]), device=device, dtype=cond_embeds.dtype)
+        
+        lang_mask = torch.ones((B, 1), device=device, dtype=torch.bool)
+        img_mask = torch.ones((B, 2), device=device, dtype=torch.bool)
+
+        return self.rdt_model(
+            x=x_embed, 
+            freq=freq, 
+            t=timestep, 
+            lang_c=lang_c, 
+            img_c=img_c,
+            lang_mask=lang_mask,
+            img_mask=img_mask
+        )
