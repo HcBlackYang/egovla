@@ -8,6 +8,11 @@ import time
 from torch.utils.data import DataLoader
 from torch.amp import autocast # BF16 不需要 GradScaler
 
+# 强制使用 Flash Attention，禁用普通数学注意力
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_math_sdp(False) 
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.fusion_encoder import FusionEncoder
@@ -52,10 +57,10 @@ def train_stage_b(args):
     
     # === 优化点 A: 编译模型 (PyTorch 2.0+) ===
     print("Compiling model with torch.compile... (First step will be slow)")
-    try:
-        model = torch.compile(model)
-    except Exception as e:
-        print(f"Compile failed, falling back to eager mode: {e}")
+    # try:
+    #     model = torch.compile(model)
+    # except Exception as e:
+    #     print(f"Compile failed, falling back to eager mode: {e}")
 
     # 2. 数据加载
     print(f"Loading data from: {args.data_root}")
@@ -142,7 +147,7 @@ def train_stage_b(args):
                 print(f"Epoch {epoch} [{i}/{len(loader)}] Loss: {loss.item():.8e} | Distill: {l_distill.item():.8e} | Speed: {speed:.1f} img/s")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    save_path = os.path.join(args.output_dir, "stageB_papercup.pt")
+    save_path = os.path.join(args.output_dir, "1223stageB_papercup.pt")
     torch.save(model.state_dict(), save_path)
     print(f"Saved to {save_path}")
 
@@ -150,10 +155,10 @@ def train_stage_b(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, required=True) 
-    parser.add_argument('--stage_a_ckpt', type=str, default='/yanghaochuan/projects/checkpoints/stageA_final.pt')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/projects/checkpoints')
+    parser.add_argument('--stage_a_ckpt', type=str, default='/yanghaochuan/checkpoints/stageA_final.pt')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/checkpoints')
     # === 优化点 C: Batch Size 翻倍 ===
-    parser.add_argument('--batch_size', type=int, default=48) # 直接上 48！
+    parser.add_argument('--batch_size', type=int, default=24) # 直接上 48！
     parser.add_argument('--num_workers', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=2)
     args = parser.parse_args()

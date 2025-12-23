@@ -29,27 +29,24 @@ class RobotPolicySystem:
         self.client = TCPClientPolicy(host=ip, port=port)
         logging.info(f"Connected to policy server at {ip}:{port}.")
         
-        # 这里的 Camera 初始化保留你的原始代码，假设是正确的
+        # Camera 初始化
         from cameras.realsense_env import RealSenseEnv
-        from cameras.usb_env import USBEnv
         from cameras.camera_param import CameraParam
         
+        # 主摄可以保留初始化，但不启动 monitoring
         self.main_camera = RealSenseEnv(camera_name="main_image", serial_number="339322073638", width=1280, height=720,
                                         camera_param=CameraParam(intrinsic_matrix = np.array([[908.1308, 0, 655.7268], [0, 910.0818, 395.8856], [0, 0, 1]], dtype=np.float32),
                                                                  distortion_coeffs = np.array([0.1068, -0.2123, -0.0092, 0.0000, 0.0000], dtype=np.float32)))
         self.wrist_camera = RealSenseEnv(camera_name="wrist_image", serial_number="342222072092", width=1280, height=720)
         
-        # Top Camera 暂时注释或保留，看你需求
-        # self.top_camera = USBEnv(...) 
-
         self.gripper_status = {"current_state": 0, "target_state": 0}
         self.stop_evaluation = threading.Event()
 
     def run(self, show_image: bool = False, task_name: str = "default_task"):
+        # [修改点] 只启动手腕相机 (Wrist-Only Inference)
         self.wrist_camera.start_monitoring()
-        # self.main_camera.start_monitoring() # 如果需要主摄请取消注释
-        current_action_chunk = []
-        last_inference_time = 0
+        # self.main_camera.start_monitoring() 
+        
         logging.info("Waiting 2.0s for cameras to warm up...")
         time.sleep(2.0)
         
@@ -59,51 +56,58 @@ class RobotPolicySystem:
             t0 = time.time()
             
             # 1. 获取图像
-            main_frame_data = self.main_camera.get_latest_frame()
+            # main_frame_data = self.main_camera.get_latest_frame() # 不读取真实主摄
             wrist_frame_data = self.wrist_camera.get_latest_frame()
 
-            if main_frame_data is None or wrist_frame_data is None:
+            if wrist_frame_data is None:
                 time.sleep(0.01)
                 continue
             
-            main_image = main_frame_data['bgr']
             wrist_image = wrist_frame_data['bgr']
+            
+            # [修改点] 构造全黑的主摄图像作为占位符
+            # 必须传给服务器，因为模型是双摄结构，但内容是全黑的（符合 Modality Dropout 训练）
+            main_image = np.zeros_like(wrist_image)
 
             # 2. 获取状态
             joint_angles = self.robot_env.get_position(action_space=ActionSpace.JOINT_ANGLES)
             gripper_width = self.robot_env.get_gripper_width()
             eef_pose = self.robot_env.get_position(action_space=ActionSpace.EEF_POSE)
             
-            # 拼接 State (8维)
+            # [修改点] 构造 8 维 qpos (7关节 + 1夹爪)
+            qpos_8d = list(joint_angles) + [float(gripper_width)]
+        
+            # [修改点] 构造 8 维 state
             state = np.concatenate([eef_pose, [gripper_width]])
             
             # 3. 构造请求
             element = {
-                # "observation/image": main_image,
+                "observation/agentview_image": main_image, # 传入全黑图，Key名需与服务端匹配
                 "observation/wrist_image": wrist_image,
                 "observation/state": state,
-                "qpos": joint_angles.tolist(), 
+                "qpos": qpos_8d, 
                 "prompt": task_name,
             }
 
             # 4. 推理 (Blocking)
             inference_results = self.client.infer(element)
-            # if inference_results is None: continue
+            
             if inference_results:
-                new_actions = inference_results["actions"][0] # 拿到 [16, 8] 的 list
+                # 获取第一个 chunk (通常 batch=1)
+                new_actions = inference_results["actions"][0] # [Chunk_Size, 8]
                 
-                # --- 阶段 B: 执行动作序列 ---
+                # --- 执行动作序列 (平滑模式) ---
+                # [修改点] 只保留这一个循环，删除原来后面的 "Step 5" 循环
                 for i, action in enumerate(new_actions):
                     t_step_start = time.time()
                     
-                    target_joints = action[:-1]
-                    gripper_val = action[-1]
+                    target_joints = action[:-1] # 前7位
+                    gripper_val = action[-1]    # 第8位
                     
-                    # A. 关节控制 (异步执行，平滑过渡)
+                    # A. 关节控制 (异步执行 + sleep 配合，实现平滑且连续的运动)
                     self.robot_env.step(target_joints, asynchronous=True)
                     
-                    # B. 夹爪控制
-                    # 简单的状态机逻辑，防止每一帧都发指令
+                    # B. 夹爪控制 (状态机防止重复发送)
                     if gripper_val > 0.06: 
                          if self.gripper_status["current_state"] != -1:
                              self.robot_env.open_gripper(asynchronous=True)
@@ -113,46 +117,20 @@ class RobotPolicySystem:
                              self.robot_env.close_gripper(asynchronous=True)
                              self.gripper_status["current_state"] = 1
                     
-                    # C. 频率控制 (20Hz = 0.05s)
-                    # 减去推理和通信的时间开销，确保动作播放是匀速的
+                    # C. 频率控制 (例如 20Hz = 0.05s, 30Hz = 0.033s)
                     dt = time.time() - t_step_start
-                    remain = 0.033 - dt # 调整为您的训练频率 (例如 20Hz)
+                    remain = 0.04 - dt # 稍微调大一点点间隔(例如 25Hz)，给通信留余量
                     if remain > 0: time.sleep(remain)
 
-
-            actions_chunk = np.array(inference_results["actions"])
-            
             # 可视化
             if show_image:
                 cv2.imshow("Wrist View", wrist_image)
                 cv2.waitKey(1)
 
-            # === 5. 执行动作 (核心修改：同步模式) ===
-            # 我们强制在这个循环里等待动作完成，绝不积压
-            for action in actions_chunk:
-                
-                # --- 关节控制 ---
-                target_joints = action if len(action) == 7 else action[:-1]
-                
-                # 关键修改：asynchronous=False
-                # 这会阻塞直到机械臂到达目标点 (消除幻影移动)
-                self.robot_env.step(target_joints, asynchronous=False) 
-                
-                # --- 夹爪控制 ---
-                if len(action) == 8:
-                    gripper_val = action[-1]
-                    # 简单的阈值逻辑
-                    if gripper_val > 0.06: # 张开阈值 (归一化前可能是 0.8)
-                         if self.gripper_status["current_state"] != -1:
-                             self.robot_env.open_gripper(asynchronous=True) # 夹爪可以异步，不影响主臂
-                             self.gripper_status["current_state"] = -1
-                    elif gripper_val < 0.02: # 闭合阈值
-                         if self.gripper_status["current_state"] != 1:
-                             self.robot_env.close_gripper(asynchronous=True)
-                             self.gripper_status["current_state"] = 1
-
             latency = (time.time() - t0) * 1000
-            print(f"\rStep Latency: {latency:.1f}ms | Executed Sync.", end="")
+            print(f"\rStep Latency: {latency:.1f}ms", end="")
+            
+            # [重要] 已删除原来的 "# === 5. 执行动作 ===" 代码块，避免双重执行
 
     def stop(self):
         self.stop_evaluation.set()

@@ -243,10 +243,15 @@ class FusionEncoder(nn.Module):
 
         # 5. 首帧注意力 (First Frame Cross-Attention)
         if first_frame_summary.dim() == 5:
-            ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, T_video, 1, 1)
+            # ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, T_video, 1, 1)
+            # with torch.no_grad():
+            #     ff_tokens = self.extract_features(ff_input)
+            #     # 处理首帧特征维度
+            #     if ff_tokens.dim() == 3: first_frame_summary = ff_tokens.mean(dim=1, keepdim=True)
+            #     elif ff_tokens.dim() == 2: first_frame_summary = ff_tokens.unsqueeze(1)
+            ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, 2, 1, 1)
             with torch.no_grad():
                 ff_tokens = self.extract_features(ff_input)
-                # 处理首帧特征维度
                 if ff_tokens.dim() == 3: first_frame_summary = ff_tokens.mean(dim=1, keepdim=True)
                 elif ff_tokens.dim() == 2: first_frame_summary = ff_tokens.unsqueeze(1)
 
@@ -263,23 +268,36 @@ class FusionEncoder(nn.Module):
 
         # 新逻辑: 保持序列 (Keep Sequence)
         # 将 weighted_task 广播到序列的每一步: [B, D] -> [B, 1, D]
+        # fused_seq = self.norm2(tokens + weighted_task.unsqueeze(1))
+        
+        # # 投影整个序列: [B, N_patches, D] -> [B, N_patches, rdt_dim]
+        # e_t_full = self.projection_head(fused_seq)
+        
+        # # 自适应池化 (Adaptive Pooling): 将过长的序列压缩到固定长度 64
+        # # [B, N, D] -> Permute -> [B, D, N] -> AdaptivePool -> [B, D, 64] -> Permute -> [B, 64, D]
+        # # 64 是一个经验值，既保留了足够的时空细节，又不会让 RDT 计算过载
+        # e_t = torch.nn.functional.adaptive_avg_pool1d(e_t_full.transpose(1, 2), 64).transpose(1, 2)
+        
+        # # 计算用于辅助Loss的全局特征 (Auxiliary Heads)
+        # # 这里使用 mean pooling 是为了对齐 Teacher 的维度 (如果是全局对齐 Loss)
+        # # 如果您的 Loss 是序列对序列的，这里也应该输出序列
+        # global_rep_for_heads = tokens.mean(dim=1)
+        # semantic_out = self.semantic_align_head(global_rep_for_heads)
+        # temporal_out = self.temporal_align_head(global_rep_for_heads)
         fused_seq = self.norm2(tokens + weighted_task.unsqueeze(1))
         
-        # 投影整个序列: [B, N_patches, D] -> [B, N_patches, rdt_dim]
-        e_t_full = self.projection_head(fused_seq)
+        # 2. 先进行自适应池化 (大幅减小数据规模)
+        # [B, N, D] -> [B, D, 64] -> [B, 64, D]
+        fused_pooled = torch.nn.functional.adaptive_avg_pool1d(fused_seq.transpose(1, 2), 64).transpose(1, 2)
         
-        # 自适应池化 (Adaptive Pooling): 将过长的序列压缩到固定长度 64
-        # [B, N, D] -> Permute -> [B, D, N] -> AdaptivePool -> [B, D, 64] -> Permute -> [B, 64, D]
-        # 64 是一个经验值，既保留了足够的时空细节，又不会让 RDT 计算过载
-        e_t = torch.nn.functional.adaptive_avg_pool1d(e_t_full.transpose(1, 2), 64).transpose(1, 2)
+        # 3. 最后进行投影 (Dropout + Linear)
+        # 此时 Dropout 作用在最终特征上，效果最好；且 Linear 计算量减少了 ~24 倍
+        e_t = self.projection_head(fused_pooled)
         
-        # 计算用于辅助Loss的全局特征 (Auxiliary Heads)
-        # 这里使用 mean pooling 是为了对齐 Teacher 的维度 (如果是全局对齐 Loss)
-        # 如果您的 Loss 是序列对序列的，这里也应该输出序列
+        # 辅助 Loss 头 (保持原样或根据需要调整)
         global_rep_for_heads = tokens.mean(dim=1)
         semantic_out = self.semantic_align_head(global_rep_for_heads)
         temporal_out = self.temporal_align_head(global_rep_for_heads)
-
         return {
             "e_t": e_t, # [B, 64, 768] (Sequence Output for RDT)
             "task_slots": task_slots,

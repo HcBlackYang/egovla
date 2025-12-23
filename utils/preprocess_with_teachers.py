@@ -45,10 +45,10 @@ def save_to_hdf5(raw_dir, output_path, siglip_path):
         grp = f.create_group("data")
         total_frames = 0
         valid_episodes_count = 0
-        
-        # 裁剪参数：头尾各切 60 帧 (2秒)
-        TRIM_HEAD = 60
-        TRIM_TAIL = 60
+
+        # 裁剪参数：头尾各切 90 帧 (3秒)
+        TRIM_HEAD = 90
+        TRIM_TAIL = 90
         
         for i, ep_path in enumerate(tqdm(episodes)):
             # 1. 读取视频
@@ -204,8 +204,8 @@ def read_json_state(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--raw_dir', type=str, default='/yanghaochuan/projects/data/pick_up_the_paper_cup', help='原始数据目录')
-    parser.add_argument('--out_path', type=str, default='/yanghaochuan/projects/data/pick_up_the_paper_cup.hdf5')
+    parser.add_argument('--raw_dir', type=str, default='/yanghaochuan/data/pick_up_the_paper_cup', help='原始数据目录')
+    parser.add_argument('--out_path', type=str, default='/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5')
     parser.add_argument('--siglip_path', type=str, default='/yanghaochuan/models/siglip-so400m-patch14-384')
     
     args = parser.parse_args()

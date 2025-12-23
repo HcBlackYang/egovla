@@ -151,7 +151,7 @@ class RobotDataset(Dataset):
                  window_size=16, 
                  pred_horizon=16, # <--- 新增: 预测未来步数 (Chunk Size)
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/projects/data/dataset_stats.json"): 
+                 stats_path="/yanghaochuan/data/1223dataset_stats.json"): 
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
