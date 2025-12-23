@@ -97,6 +97,7 @@ python train/stageC_joint.py \
   --batch_size 16 \
   --epochs 50 \
   --pred_horizon 16
+python train/stageC_joint.py --data_root /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5 --output_dir /yanghaochuan/checkpoints --stage_b_ckpt /yanghaochuan/projects/checkpoints/1223stageB_papercup.pt --batch_size 16 --epochs 50 --pred_horizon 64
 ```
 注意: 如果显存不足，请减小 batch_size。此阶段不再使用 Latent Cache，而是端到端训练以支持动态 Dropout。
 

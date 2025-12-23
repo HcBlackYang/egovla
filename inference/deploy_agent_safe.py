@@ -12,8 +12,8 @@ from transformers import T5Tokenizer
 import torch._dynamo
 
 # === 导入你的模型 ===
-from models.fusion_encoder import FusionEncoder
-from models.rdt_model import RDTWrapper
+from model.fusion_encoder import FusionEncoder
+from model.rdt_model import RDTWrapper
 
 # === 基础路径 ===
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
@@ -76,7 +76,7 @@ class RealTimeAgent:
     def __init__(self):
         self.device = DEVICE
         self.safety = SafetyController() 
-        self.pred_horizon = 16
+        self.pred_horizon = 64
 
         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
         try:

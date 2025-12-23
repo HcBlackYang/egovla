@@ -622,22 +622,26 @@
 #             img_mask=img_mask
 #         )
 
+import sys
+import os
 import torch
 import torch.nn as nn
-import os
-import sys
-import json
 import logging
-import inspect
-import importlib.util
+import json
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("[RDTWrapper]")
 
 # =========================================================================
-# 1. 基础补丁 (保持不变)
+# 1. 环境配置 (确保能找到 RDT 库)
 # =========================================================================
+RDT_ROOT = "/yanghaochuan/projects/RoboticsDiffusionTransformer"
+
+if RDT_ROOT not in sys.path:
+    sys.path.insert(0, RDT_ROOT)
+
+# 基础补丁
 def force_to_int(val):
     try:
         if hasattr(val, 'item'): val = val.item()
@@ -651,220 +655,195 @@ def patched_linear_init(self, in_features, out_features, bias=True, device=None,
 torch.nn.Linear.__init__ = patched_linear_init
 
 # =========================================================================
-# 2. 加载 RDT 源码
+# 2. 导入 RDT 模型类
 # =========================================================================
-RDT_ROOT = "/yanghaochuan/projects/RoboticsDiffusionTransformer"
-RDT_MODELS_DIR = os.path.join(RDT_ROOT, "models")
-if RDT_ROOT not in sys.path: sys.path.insert(0, RDT_ROOT)
-if RDT_MODELS_DIR not in sys.path: sys.path.insert(0, RDT_MODELS_DIR)
-if "models" in sys.modules and RDT_MODELS_DIR not in sys.modules["models"].__path__:
-    sys.modules["models"].__path__.append(RDT_MODELS_DIR)
-
-TARGET_FILE_PATH = os.path.join(RDT_ROOT, "models", "rdt", "model.py")
 ModelClass = None
-if os.path.exists(TARGET_FILE_PATH):
+try:
+    from models.rdt.model import MultimodalDiffusionTransformer
+    ModelClass = MultimodalDiffusionTransformer
+    logger.info("✅ Successfully imported MultimodalDiffusionTransformer.")
+except ImportError:
     try:
-        spec = importlib.util.spec_from_file_location("rdt_source_model", TARGET_FILE_PATH)
-        rdt_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rdt_module)
-        for name, obj in inspect.getmembers(rdt_module):
-            if inspect.isclass(obj) and issubclass(obj, nn.Module):
-                if any(k in name for k in ["Transformer", "RDT", "Model"]) and "Layer" not in name:
-                    ModelClass = obj
-                    break
-        if ModelClass: logger.info(f"✅ Locked Model Class: {ModelClass.__name__}")
-    except Exception as e:
-        logger.error(f"❌ Load failed: {e}")
+        from models.rdt.model import RDT
+        ModelClass = RDT
+        logger.info("✅ Successfully imported RDT.")
+    except ImportError as e:
+        logger.error(f"❌ Import failed: {e}. Check RDT_ROOT.")
+        raise RuntimeError("Could not load RDT Model Class.")
 
 # =========================================================================
-# 3. RDTWrapper (修复 Config 读取 + 维度对齐)
+# 3. RDTWrapper (形状完美匹配版)
 # =========================================================================
 class RDTWrapper(nn.Module):
     def __init__(self, 
                  action_dim=8, 
                  model_path='/yanghaochuan/models/rdt-1b',
-                 rdt_cond_dim=768,  # <--- 你的 FusionEncoder 输出是 768
-                 pred_horizon=16):
+                 rdt_cond_dim=768, 
+                 pred_horizon=64):
         super().__init__()
-        if ModelClass is None: raise RuntimeError("RDT Class not found")
-
-        # 1. 精确读取 Config
+        
+        # 1. 加载 Config 文件
         config_path = os.path.join(model_path, "config.json")
         if not os.path.exists(config_path): config_path = os.path.join(model_path, "config.yaml")
         
-        # 显式构造参数字典
-        kwargs = self._parse_config_robust(config_path)
-        
-        # ⚠️ 强制修正：Config 文件虽然是对的，但为了防止代码读错，这里强制写死 2048
-        kwargs['hidden_size'] = 2048
-        kwargs['action_dim'] = int(action_dim)
-        kwargs['output_dim'] = int(action_dim)
-        kwargs['horizon'] = int(pred_horizon)
-        kwargs['pred_horizon'] = int(pred_horizon)
-        
-        logger.info(f"🛠️  Forcing RDT Init: hidden_size=2048, action_dim={action_dim}")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config not found at {config_path}")
 
-        # 2. 实例化模型
+        with open(config_path, 'r') as f:
+            raw_cfg = json.load(f)
+
+        # 提取 rdt 内部配置
+        rdt_cfg = raw_cfg.get('rdt', raw_cfg)
+
+        # 2. 构造精准参数字典
+        model_kwargs = {
+            "hidden_size": 2048, 
+            "output_dim": int(action_dim),
+            
+            # [Input Length Logic]
+            # State(1) + Action(64) = 65 (Input Sequence)
+            # RDT adds Time(1) + Freq(1) internally -> Total Pos Embed needed = 67
+            # RDT defines x_pos_embed as horizon + 2.
+            # So horizon must be 65.
+            "horizon": int(pred_horizon) + 1,
+            
+            "depth": int(rdt_cfg.get("depth", 28)),
+            "num_heads": int(rdt_cfg.get("num_heads", 16)),
+            "max_lang_cond_len": int(raw_cfg.get("max_lang_cond_len", 1024)),
+            "img_cond_len": int(raw_cfg.get("img_cond_len", 4096)),
+            "lang_pos_embed_config": raw_cfg.get("lang_pos_embed_config", None),
+            "img_pos_embed_config": raw_cfg.get("img_pos_embed_config", None),
+            "dtype": torch.float32 
+        }
+
+        # 3. 初始化模型
+        logger.info(f"🛠️ Init RDT: hidden_size={model_kwargs['hidden_size']}, horizon={model_kwargs['horizon']}")
+        
         try:
-            self.rdt_model = ModelClass(**kwargs)
-        except:
-            # 备用方案：传对象
-            class Args: pass
-            args = Args()
-            for k, v in kwargs.items(): setattr(args, k, v)
-            self.rdt_model = ModelClass(args)
+            self.rdt_model = ModelClass(**model_kwargs)
+        except TypeError as e:
+            raise RuntimeError(f"Model Init failed. Error: {e}")
 
-        # 3. 维度检查
+        self.rdt_hidden_size = 2048
+        
+        # 4. 验证维度
         actual_dim = 0
         for m in self.rdt_model.modules():
             if isinstance(m, nn.Linear):
                 actual_dim = m.out_features
                 break
-        
-        if actual_dim != 2048:
-            logger.error(f"❌ FATAL: Model initialized as {actual_dim}, expected 2048!")
-            # 暴力修正（虽然很少见需要这样做）
-            self.rdt_model.hidden_size = 2048
-        
-        self.rdt_hidden_size = 2048
+        logger.info(f"🔍 Actual Initialized Dimension: {actual_dim}")
 
-        # 4. 建立投影层 (Project 768 -> 2048)
-        # 这是解决你训练导致的 768 维问题的关键
+        # 5. 建立投影层
         self.visual_proj = nn.Linear(int(rdt_cond_dim), 2048)
         self.action_proj = nn.Linear(int(action_dim), 2048)
+        self.state_proj = nn.Linear(8, 2048) 
 
-        logger.info(f"🏗️ Projections: Visual(768->2048), Action({action_dim}->2048)")
+        # 6. 加载权重
+        self._load_weights_correctly(model_path)
 
-        # 5. 加载权重 + 手术
-        self._load_and_surgically_fix_weights(model_path, pred_horizon)
-
-        # 6. 修正内部参数
+        # 7. 修正 img_pos_embed
         if hasattr(self.rdt_model, 'img_cond_pos_embed'):
-            # 缩小内部 img pos embed 以避免不必要的计算或报错
             if self.rdt_model.img_cond_pos_embed.shape[1] > 2:
                 old = self.rdt_model.img_cond_pos_embed.data
                 self.rdt_model.img_cond_pos_embed = nn.Parameter(old[:, :2, :].clone())
 
-    def _parse_config_robust(self, path):
-        """专门针对你的 config 结构进行解析"""
-        with open(path, 'r') as f: cfg = json.load(f)
-        kwargs = {}
-        # 1. 先把外层参数拿进来
-        for k, v in cfg.items():
-            if k != 'rdt': kwargs[k] = v
-        
-        # 2. 重点解析 'rdt' 内部参数，并覆盖外层
-        # 你的 config 里 hidden_size 在 rdt 下面，所以这一步至关重要
-        if 'rdt' in cfg and isinstance(cfg['rdt'], dict):
-            for k, v in cfg['rdt'].items():
-                kwargs[k] = v
-        
-        # 3. 补充默认值
-        kwargs.setdefault('patch_size', 14)
-        kwargs.setdefault('img_size', 224)
-        
-        return kwargs
-
-    def _load_and_surgically_fix_weights(self, model_path, pred_horizon):
+    def _load_weights_correctly(self, model_path):
         weights_path = os.path.join(model_path, "pytorch_model.bin")
         if not os.path.exists(weights_path): 
             weights_path = os.path.join(model_path, "diffusion_pytorch_model.bin")
         
-        if not os.path.exists(weights_path): return
+        if not os.path.exists(weights_path): 
+            logger.warning("No weights found!")
+            return
 
-        logger.info("Loading weights...")
-        state_dict = torch.load(weights_path, map_location="cpu")
-        
-        # 1. 过滤不匹配的权重
-        current_dict = self.rdt_model.state_dict()
+        logger.info(f"Loading weights from {weights_path}...")
+        try:
+            state_dict = torch.load(weights_path, map_location="cpu")
+        except:
+            state_dict = torch.load(weights_path, map_location="cpu", weights_only=False)
+
         new_dict = {}
-        ckpt_x_embed = None
+        current_keys = self.rdt_model.state_dict().keys()
 
         for k, v in state_dict.items():
-            if "x_pos_embed" in k:
-                ckpt_x_embed = v
-                continue
+            k_clean = k
+            if k.startswith("model."):
+                k_clean = k[6:] 
+            elif k.startswith("module."):
+                k_clean = k[7:]
             
-            k_clean = k.replace("module.", "")
-            if k_clean in current_dict:
-                # 图像位置编码截断
-                if "img_cond_pos_embed" in k_clean and v.shape[1] > 2:
-                    v = v[:, :2, :]
-                
-                if v.shape == current_dict[k_clean].shape:
+            if "img_cond_pos_embed" in k_clean and v.shape[1] > 2:
+                v = v[:, :2, :]
+
+            if k_clean in current_keys:
+                target_shape = self.rdt_model.state_dict()[k_clean].shape
+                if v.shape == target_shape:
                     new_dict[k_clean] = v
-        
-        self.rdt_model.load_state_dict(new_dict, strict=False)
-
-        # 2. 修复 x_pos_embed
-        if ckpt_x_embed is not None:
-            # 确保 embedding 也是 2048 维
-            if ckpt_x_embed.shape[-1] != 2048:
-                logger.warning("Checkpoint dimensions weird, skipping x_pos_embed fix.")
-                return
-
-            parts = []
-            parts.append(ckpt_x_embed[:, 0:1, :]) # Time
-            parts.append(ckpt_x_embed[:, 1:2, :]) # Freq
-            parts.append(torch.zeros(1, 1, 2048))  # State (New)
             
-            # Actions
-            start = 2
-            avail = ckpt_x_embed.shape[1] - start
-            take = min(avail, pred_horizon)
-            parts.append(ckpt_x_embed[:, start : start+take, :])
-            
-            if take < pred_horizon:
-                parts.append(torch.zeros(1, pred_horizon - take, 2048))
-            
-            final_embed = torch.cat(parts, dim=1)
-            self.rdt_model.x_pos_embed = nn.Parameter(final_embed)
-            logger.info("✅ x_pos_embed fixed (Time+Freq+State+Actions).")
+        missing, unexpected = self.rdt_model.load_state_dict(new_dict, strict=False)
+        logger.info(f"Weights loaded. Missing keys: {len(missing)}")
+        if "x_pos_embed" not in new_dict:
+            logger.warning("⚠️ Critical: x_pos_embed was NOT loaded!")
+        else:
+            logger.info("✅ x_pos_embed successfully loaded.")
 
     def forward(self, noisy_action, timestep, conditions):
         B = noisy_action.shape[0]
         device = noisy_action.device
         dtype = self.action_proj.weight.dtype
 
-        # 1. Visual (768 -> 2048)
+        # 1. Visual
         e_t = conditions['e_t'] 
         img_c = self.visual_proj(e_t.to(dtype))
 
-        # 2. State (Dummy -> 2048)
-        state_embed = torch.zeros((B, 1, 2048), device=device, dtype=dtype)
+        # 2. State
+        state = conditions.get('state', torch.zeros((B, 8), device=device, dtype=dtype))
+        if state.dim() == 2: state = state.unsqueeze(1)
+        state_embed = self.state_proj(state.to(dtype))
 
-        # 3. Action (8 -> 2048)
+        # 3. Action
         if noisy_action.dim() == 2: noisy_action = noisy_action.unsqueeze(1)
         action_embed = self.action_proj(noisy_action.to(dtype))
 
-        # 4. Concat Input
+        # 4. Concat: [State(1), Action(N)] -> Total Length = 65
         x_input = torch.cat([state_embed, action_embed], dim=1)
 
-        # 5. Others
+        # 5. Mask Setup (bool)
         lang_c = torch.zeros((B, 1, 2048), device=device, dtype=dtype)
-        lang_mask = torch.ones((B, 1), device=device, dtype=torch.long)
+        # False = Valid (Attend), True = Masked
+        lang_mask = torch.zeros((B, 1), device=device, dtype=torch.bool)
         
         target_img_len = self.rdt_model.img_cond_pos_embed.shape[1]
         if img_c.shape[1] > target_img_len:
             img_c = img_c[:, :target_img_len, :]
-        img_mask = torch.ones((B, img_c.shape[1]), device=device, dtype=torch.long)
+        
+        img_mask = torch.zeros((B, img_c.shape[1]), device=device, dtype=torch.bool)
         
         freq = torch.full((B,), 30, device=device, dtype=torch.long)
 
         # 6. Forward
-        return self.rdt_model(
+        pred = self.rdt_model(
             x=x_input, freq=freq, t=timestep, 
             lang_c=lang_c, img_c=img_c, 
             lang_mask=lang_mask, img_mask=img_mask
         )
+        
+        # [关键修复] Output shape is [B, 65, 8] (State + Actions)
+        # We only need predictions for Actions [B, 64, 8]
+        # Slice off the first token (State)
+        return pred[:, 1:, :]
 
     def save_pretrained(self, save_directory):
         self.rdt_model.save_pretrained(save_directory)
         torch.save(self.visual_proj.state_dict(), os.path.join(save_directory, "visual_proj.bin"))
         torch.save(self.action_proj.state_dict(), os.path.join(save_directory, "action_proj.bin"))
+        torch.save(self.state_proj.state_dict(), os.path.join(save_directory, "state_proj.bin"))
 
     def load_pretrained_projections(self, save_directory):
         p_vis = os.path.join(save_directory, "visual_proj.bin")
         p_act = os.path.join(save_directory, "action_proj.bin")
+        p_sta = os.path.join(save_directory, "state_proj.bin")
         if os.path.exists(p_vis): self.visual_proj.load_state_dict(torch.load(p_vis))
         if os.path.exists(p_act): self.action_proj.load_state_dict(torch.load(p_act))
+        if os.path.exists(p_sta): self.state_proj.load_state_dict(torch.load(p_sta))

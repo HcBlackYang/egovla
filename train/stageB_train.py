@@ -15,7 +15,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.fusion_encoder import FusionEncoder
+from model.fusion_encoder import FusionEncoder
 from losses.distillation_loss import DistillationLoss
 from losses.decoupling_regularizer import DecouplingLoss
 from losses.temporal_consistency import TemporalConsistencyLoss

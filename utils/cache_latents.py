@@ -11,7 +11,7 @@ from torch.amp import autocast
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.fusion_encoder import FusionEncoder
+from model.fusion_encoder import FusionEncoder
 from utils.dataset_loader import RobotDataset
 
 # 路径配置

@@ -1,218 +1,264 @@
-# # # import h5py
-# # # import numpy as np
-# # # import argparse
-
-# # # def inspect_hdf5(file_path):
-# # #     print(f"正在检查文件: {file_path} ...\n")
-    
-# # #     try:
-# # #         with h5py.File(file_path, 'r') as f:
-# # #             data_grp = f['data']
-# # #             print(f"总共包含演示条数: {len(data_grp)}")
-            
-# # #             # 随机抽查前 3 个 demo
-# # #             demo_keys = list(data_grp.keys())[:10]
-            
-# # #             for key in demo_keys:
-# # #                 print(f"\n=== 检查 {key} ===")
-# # #                 demo = data_grp[key]
-                
-# # #                 # 1. 检查长度 (验证降采样)
-# # #                 qpos = demo['obs']['robot0_joint_pos'][:]
-# # #                 img = demo['obs']['agentview_image'][:]
-# # #                 actions = demo['actions'][:]
-                
-# # #                 print(f"数据长度 (Frames): {len(qpos)}")
-# # #                 if len(qpos) < 500:
-# # #                     print("✅ 长度符合预期 (原始约100帧 -> 降采样后约20帧)")
-# # #                 else:
-# # #                     print("❌ 长度过长，可能降采样未生效！")
-
-# # #                 # 2. 检查起步运动 (验证静止切除)
-# # #                 # 打印前 3 帧的关节角度变化
-# # #                 print("\n前 5 帧关节角度 (Joint 0-3):")
-# # #                 for i in range(min(5, len(qpos))):
-# # #                     print(f"Frame {i}: {qpos[i][:4]}")
-                
-# # #                 # 计算第0帧和第1帧的平均变化量
-# # #                 diff = np.mean(np.abs(qpos[1] - qpos[0]))
-# # #                 print(f"\nFrame 0 -> 1 平均变化量: {diff:.6f}")
-                
-# # #                 if diff > 0.0005: # 0.0005 rad 约等于 0.03度，降采样后变化量应该很大
-# # #                     print("✅ 起步即有动作 (静止帧已切除)")
-# # #                 else:
-# # #                     print("⚠️ 起步变化极小，可能仍包含静止帧")
-
-# # #                 # 3. 检查教师特征 (验证双视角教师)
-# # #                 if 'teacher_siglip' in demo and 'teacher_exo' in demo:
-# # #                     siglip_shape = demo['teacher_siglip'].shape
-# # #                     exo_shape = demo['teacher_exo'].shape
-# # #                     print(f"\n✅ 教师特征存在:")
-# # #                     print(f"   SigLIP (Global): {siglip_shape}")
-# # #                     print(f"   Exo (Wrist):     {exo_shape}")
-                    
-# # #                     # 检查 Exo 是否全是 0 (验证是否有手腕视频)
-# # #                     if np.all(demo['teacher_exo'][:] == 0):
-# # #                         print("⚠️ 警告: Exo 特征全为 0 (可能缺少 wrist_image.mp4)")
-# # #                     else:
-# # #                         print("✅ Exo 特征正常 (非全0)")
-# # #                 else:
-# # #                     print("❌ 缺少教师特征数据！")
-
-# # #     except Exception as e:
-# # #         print(f"无法读取文件: {e}")
-
-# # # if __name__ == "__main__":
-# # #     # 修改这里为你生成的 HDF5 路径
-# # #     file_path = "/yanghaochuan/projects/data/pick_up_the_paper_cup.hdf5" 
-# # #     inspect_hdf5(file_path)
-
-# # import h5py
-# # import numpy as np
-# # import cv2
-# # import os
-
-# # def diagnose(file_path):
-# #     print(f"🏥 正在诊断 HDF5 文件: {file_path} ...\n")
-    
-# #     if not os.path.exists(file_path):
-# #         print("❌ 文件不存在！")
-# #         return
-
-# #     try:
-# #         with h5py.File(file_path, 'r') as f:
-# #             data = f['data']
-# #             print(f"📊 总数据量: {len(data)} 条 Episodes")
-            
-# #             # === 1. 随机抽查 3 条数据 ===
-# #             sample_keys = list(data.keys())[:3]
-            
-# #             for key in sample_keys:
-# #                 print(f"\n--- 检查 {key} ---")
-# #                 demo = data[key]
-                
-# #                 # 读取关键数据
-# #                 qpos = demo['obs']['robot0_joint_pos'][:]
-# #                 actions = demo['actions'][:]
-# #                 imgs = demo['obs']['agentview_image'][:]
-                
-# #                 # --- A. 长度检查 ---
-# #                 T = len(actions)
-# #                 print(f"1. 时间步长 (Frames): {T}")
-# #                 # 30Hz 下，10秒应该是 300帧左右。如果小于 100 或大于 600 都不对劲
-# #                 if 150 <= T <= 450:
-# #                     print(f"   ✅ 长度合理 (约 {T/30:.1f} 秒)")
-# #                 else:
-# #                     print(f"   ⚠️ 长度异常！可能过短或过长")
-
-# #                 # --- B. 维度检查 (最关键!) ---
-# #                 print(f"2. Action 维度: {actions.shape}")
-# #                 if actions.shape[1] == 8:
-# #                     print("   ✅ 维度正确 (7关节 + 1夹爪)")
-# #                 else:
-# #                     print(f"   ❌ 维度错误！期望 (T, 8), 实际 {actions.shape} (夹爪丢了？)")
-
-# #                 # --- C. 夹爪数值检查 ---
-# #                 gripper_data = actions[:, 7] # 第8列
-# #                 g_min, g_max = gripper_data.min(), gripper_data.max()
-# #                 g_diff = g_max - g_min
-# #                 print(f"3. 夹爪活动范围: {g_min:.4f} ~ {g_max:.4f} (Diff: {g_diff:.4f})")
-# #                 if g_diff > 0.0001:
-# #                     print("   ✅ 夹爪有动作 (数据正常)")
-# #                 else:
-# #                     print("   ⚠️ 警告：夹爪似乎全程没动 (或全是0)")
-
-# #                 # --- D. 图像与特征检查 ---
-# #                 print(f"4. 图像形状: {imgs.shape}")
-# #                 if 'teacher_siglip' in demo:
-# #                     feat_shape = demo['teacher_siglip'].shape
-# #                     print(f"   ✅ Teacher Feature: {feat_shape} (SigLIP)")
-# #                 else:
-# #                     print("   ❌ 缺少 Teacher Feature")
-
-# #             # === 2. 导出视频 (视觉验证) ===
-# #             print(f"\n🎥 正在将 {sample_keys[0]} 还原为视频以供目测...")
-# #             save_video_from_hdf5(data[sample_keys[0]], "debug_check_video.mp4")
-
-# #     except Exception as e:
-# #         print(f"❌ 读取失败: {e}")
-
-# # def save_video_from_hdf5(group, save_path):
-# #     images = group['obs']['agentview_image'][:] # (T, 224, 224, 3)
-    
-# #     # 初始化视频写入
-# #     h, w = images.shape[1], images.shape[2]
-# #     out = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
-    
-# #     for i in range(len(images)):
-# #         # HDF5里通常是 RGB，OpenCV 需要 BGR
-# #         img_bgr = cv2.cvtColor(images[i], cv2.COLOR_RGB2BGR)
-# #         out.write(img_bgr)
-    
-# #     out.release()
-# #     print(f"✅ 视频已保存至: {os.path.abspath(save_path)}")
-# #     print("   -> 请下载此视频并在本地播放，检查动作是否丝滑、有无卡顿。")
-
-# # if __name__ == "__main__":
-# #     # 修改为你的文件路径
-# #     file_path = "/yanghaochuan/projects/data/pick_up_the_paper_cup.hdf5"
-# #     diagnose(file_path)
-
-# # utils/compute_stats.py
+# import torch
 # import h5py
-# import numpy as np
-# import argparse
-# import json
 # import os
+# import numpy as np
 
-# def compute_stats(data_root, output_path):
-#     print(f"Reading data from {data_root}...")
-#     all_qpos = []
-    
-#     with h5py.File(data_root, 'r') as f:
-#         demos = list(f['data'].keys())
-#         for key in demos:
-#             # 读取 actions 或 robot0_joint_pos (8维: 7关节+1夹爪)
-#             qpos = f['data'][key]['actions'][:]
-#             all_qpos.append(qpos)
-    
-#     # 拼接所有数据 [N, 8]
-#     all_data = np.concatenate(all_qpos, axis=0)
-    
-#     # 计算统计量
-#     mean = np.mean(all_data, axis=0).tolist()
-#     std = np.std(all_data, axis=0).tolist()
-    
-#     # 防止 std 为 0 (比如夹爪一直没动)
-#     std = [s if s > 1e-6 else 1.0 for s in std]
-    
-#     # 简单的 Min/Max 统计用于参考
-#     min_val = np.min(all_data, axis=0).tolist()
-#     max_val = np.max(all_data, axis=0).tolist()
+# # ================= 路径配置 =================
+# PATHS = {
+#     "RDT_WEIGHTS": "/yanghaochuan/models/rdt-1b/pytorch_model.bin",
+#     "CHECKPOINT":  "/yanghaochuan/checkpoints/1223stageB_papercup.pt",
+#     "DATASET":     "/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5"
+# }
+# # ===========================================
 
-#     stats = {
-#         "action_mean": mean,
-#         "action_std": std,
-#         "action_min": min_val,
-#         "action_max": max_val
-#     }
+# def print_header(title):
+#     print(f"\n{'='*20} {title} {'='*20}")
+
+# def inspect_torch_file(path, label):
+#     print_header(f"Inspecting {label}")
+#     if not os.path.exists(path):
+#         # 自动尝试备选文件名
+#         if path.endswith("pytorch_model.bin"):
+#             alt = path.replace("pytorch_model.bin", "diffusion_pytorch_model.bin")
+#             if os.path.exists(alt): path = alt
+        
+#         if not os.path.exists(path):
+#             print(f"❌ 文件未找到: {path}")
+#             return
+
+#     try:
+#         # 尝试加载，兼容不同版本
+#         try: data = torch.load(path, map_location='cpu')
+#         except: data = torch.load(path, map_location='cpu', weights_only=False)
+#     except Exception as e:
+#         print(f"❌ 加载失败: {e}")
+#         return
+
+#     # 识别是否是 Checkpoint 格式
+#     state_dict = data
+#     if isinstance(data, dict) and 'state_dict' in data:
+#         print(f"ℹ️  格式: Checkpoint (包含 'state_dict')")
+#         if 'args' in data: 
+#             print(f"ℹ️  训练参数 (Args): {data['args']}") # 打印训练时的参数配置
+#         state_dict = data['state_dict']
     
-#     print("=== Statistics Computed ===")
-#     print(f"Mean: {mean}")
-#     print(f"Std:  {std}")
+#     print(f"ℹ️  总 Key 数量: {len(state_dict)}")
     
-#     with open(output_path, 'w') as f:
-#         json.dump(stats, f, indent=4)
-#     print(f"Saved stats to {output_path}")
+#     # === 1. 只搜索关键张量 (避免刷屏) ===
+#     watchlist = ["x_pos_embed", "pos_embed", "img_cond_pos_embed", "state_proj", "action_proj", "visual_proj"]
+#     print("\n🔍 --- 关键张量透视 (Filtered) ---")
+#     found_any = False
+    
+#     for k, v in state_dict.items():
+#         # 只打印 watchlist 里的，或者包含 'embed' 的前几个
+#         if any(w in k for w in watchlist):
+#             if torch.is_tensor(v):
+#                 print(f"  • {k:<45} | Shape: {list(v.shape)}")
+                
+#                 # 针对 x_pos_embed 做详细维度分析
+#                 if "x_pos_embed" in k and v.dim() == 3:
+#                     T = v.shape[1]
+#                     print(f"    👉 [深度分析] 长度={T}")
+#                     if T == 34: print("       -> 推测结构: Time(1) + Freq(1) + Action(32)")
+#                     elif T == 67: print("       -> 推测结构: Time(1) + Freq(1) + State(1) + Action(64)")
+#                     elif T == 35: print("       -> 推测结构: Time(1) + Freq(1) + State(1) + Action(32)")
+#             found_any = True
+
+#     if not found_any: print("  (未发现关键张量，可能是 LoRA 权重或结构不同)")
+
+#     # === 2. 打印前 5 个 Key 供参考 ===
+#     print("\n📄 --- 头部 Key 采样 (前5个) ---")
+#     for k in list(state_dict.keys())[:5]:
+#         print(f"  • {k}")
+
+# def inspect_hdf5_file(path, label):
+#     print_header(f"Inspecting {label}")
+#     if not os.path.exists(path):
+#         print(f"❌ 文件未找到: {path}")
+#         return
+
+#     try:
+#         with h5py.File(path, 'r') as f:
+#             print(f"ℹ️  根目录 Keys: {list(f.keys())}")
+            
+#             print("\n🔍 --- 搜索 Action 和 Image 数据 (抽样) ---")
+#             matches_act = 0
+#             matches_img = 0
+            
+#             # 智能遍历：只找关键数据集，不遍历所有 demo
+#             def sparse_visit(name, node):
+#                 nonlocal matches_act, matches_img
+                
+#                 if isinstance(node, h5py.Dataset):
+#                     lower_name = name.lower()
+                    
+#                     # 1. 检查 Action (只打印前 2 个找到的)
+#                     if 'action' in lower_name and matches_act < 2:
+#                         print(f"  • {name:<45} | Shape: {node.shape} | Type: {node.dtype}")
+#                         data = node[:]
+#                         print(f"    👉 [统计] Min={np.min(data):.2f}, Max={np.max(data):.2f}, Mean={np.mean(data):.2f}")
+#                         matches_act += 1
+                        
+#                     # 2. 检查 Image (只打印前 2 个找到的)
+#                     elif ('image' in lower_name or 'rgb' in lower_name) and matches_img < 2:
+#                         print(f"  • {name:<45} | Shape: {node.shape}")
+#                         matches_img += 1
+            
+#             # 使用 visititems 遍历，但通过计数器控制输出量
+#             f.visititems(sparse_visit)
+            
+#             if matches_act == 0: 
+#                 print("  ⚠️ 未找到名为 'action' 的数据集，请检查命名 (如 'actions', 'joint_states')")
+
+#     except Exception as e:
+#         print(f"❌ 读取 HDF5 失败: {e}")
 
 # if __name__ == "__main__":
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--data_root', type=str, default='/yanghaochuan/projects/data/pick_up_the_paper_cup.hdf5')
-#     parser.add_argument('--output_path', type=str, default='/yanghaochuan/projects/data/dataset_stats.json')
-#     args = parser.parse_args()
-#     compute_stats(args.data_root, args.output_path)
+#     # 1. 检查 RDT 原始权重 (看看它是 32 还是 64)
+#     inspect_torch_file(PATHS["RDT_WEIGHTS"], "RDT Base Weights (.bin)")
+    
+#     # 2. 检查 Stage B Checkpoint (看看你之前的训练保存了什么)
+#     inspect_torch_file(PATHS["CHECKPOINT"], "Stage B Checkpoint (.pt)")
+    
+#     # 3. 检查数据集 (看看数据里 Action 到底是多长)
+#     inspect_hdf5_file(PATHS["DATASET"], "HDF5 Dataset")
 
-import h5py
-with h5py.File("/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5", 'r') as f:
-    print(f['data/demo_0/teacher_siglip'].shape) 
-    # 必须输出 (T, 1152)。如果是 (T, 768)，你必须重新生成数据！
+import torch
+import sys
+import os
+import torch
+import torch.nn as nn
+
+# ==========================================
+# 1. 强力环境配置 (解决 ModuleNotFoundError)
+# ==========================================
+# RDT 库的真实根目录
+RDT_ROOT = "/yanghaochuan/projects/RoboticsDiffusionTransformer"
+
+print(f"🔄 [Step 1] 切换工作目录到 RDT 源码库: {RDT_ROOT}")
+# 物理切换目录，让 python import models 自然指向库文件
+os.chdir(RDT_ROOT)
+
+# 把路径加到最前面
+if RDT_ROOT not in sys.path:
+    sys.path.insert(0, RDT_ROOT)
+
+# 🧹 扫除障碍：如果之前错误加载了 'models'，把它踢出内存
+keys_to_clean = [k for k in sys.modules if k == 'models' or k.startswith('models.')]
+if keys_to_clean:
+    print(f"🧹 [Step 2] 清理冲突模块缓存: {len(keys_to_clean)} 个")
+    for k in keys_to_clean:
+        del sys.modules[k]
+
+print("🚀 [Step 3] 尝试导入 RDT 模型类...")
+
+try:
+    # 现在的环境应该和在 RDT 根目录运行一模一样
+    from models.rdt.model import MultimodalDiffusionTransformer
+    ModelClass = MultimodalDiffusionTransformer
+    print(f"✅ 成功导入: {ModelClass.__name__}")
+except ImportError:
+    try:
+        from models.rdt.model import RDT
+        ModelClass = RDT
+        print(f"✅ 成功导入: {ModelClass.__name__}")
+    except Exception as e:
+        print(f"❌ 导入彻底失败: {e}")
+        sys.exit(1)
+
+# ==========================================
+# 2. 开始核心测试 (测出到底谁是 1152)
+# ==========================================
+
+def run_test():
+    print("\n" + "="*50)
+    print("🧪 诊断开始：模型到底吃哪一套参数？")
+    print("="*50)
+
+    # 准备基础参数 (防止无关报错)
+    base_kwargs = {
+        'action_dim': 8, 'horizon': 64, 'pred_horizon': 64,
+        'img_token_dim': 1152, 'lang_token_dim': 4096, 'state_token_dim': 128,
+        'patch_size': 14, 'img_size': 224, 
+        'img_adaptor': 'mlp2x_gelu', 'lang_adaptor': 'mlp2x_gelu', 'state_adaptor': 'mlp2x_gelu',
+        'depth': 1, 'num_heads': 1 # 设小点，跑得快
+    }
+
+    # --- 测试 A: 扁平参数 (Kwargs) ---
+    print("\n👉 测试 A: 传入扁平参数 (kwargs['hidden_size'] = 2048)")
+    kwargs_a = base_kwargs.copy()
+    kwargs_a['hidden_size'] = 2048 # <--- 我们希望生效的值
+    
+    try:
+        model_a = ModelClass(**kwargs_a)
+        
+        # 检查生效情况
+        val_a = getattr(model_a, 'hidden_size', '未找到属性')
+        
+        # 深度检查：看模型内部第一个 Linear 层的维度
+        linear_dim_a = "未知"
+        for m in model_a.modules():
+            if isinstance(m, nn.Linear):
+                linear_dim_a = m.out_features
+                break
+                
+        print(f"   [结果] model.hidden_size: {val_a}")
+        print(f"   [结果] 实际 Linear 维度:  {linear_dim_a}")
+        
+        if linear_dim_a == 2048:
+            print("   🎉 结论：扁平传参有效！")
+        elif linear_dim_a == 1152:
+            print("   ⚠️ 结论：扁平传参失效！模型使用了默认值 1152。")
+        else:
+            print(f"   ❓ 结论：奇怪的值 {linear_dim_a}")
+            
+    except Exception as e:
+        print(f"   ❌ 报错: {e}")
+
+
+    # --- 测试 B: 嵌套 Config (args.rdt) ---
+    print("\n👉 测试 B: 传入嵌套结构 (args.rdt['hidden_size'] = 2048)")
+    
+    class Args: pass
+    args_b = Args()
+    # 模拟 Config 文件的嵌套结构
+    args_b.rdt = {'hidden_size': 2048} 
+    # 同时也把其他参数赋给 args (混合模式)
+    for k, v in base_kwargs.items(): setattr(args_b, k, v)
+    
+    try:
+        # 有些模型可能不支持直接传对象，我们先试试
+        model_b = ModelClass(args_b)
+        
+        val_b = getattr(model_b, 'hidden_size', '未找到属性')
+        linear_dim_b = "未知"
+        for m in model_b.modules():
+            if isinstance(m, nn.Linear):
+                linear_dim_b = m.out_features
+                break
+                
+        print(f"   [结果] model.hidden_size: {val_b}")
+        print(f"   [结果] 实际 Linear 维度:  {linear_dim_b}")
+        
+        if linear_dim_b == 2048:
+            print("   🎉 结论：嵌套结构有效！必须构造 args.rdt。")
+            
+    except Exception as e:
+        print(f"   ❌ 报错 (可能模型不支持对象传参): {e}")
+        
+        # 如果对象传参失败，试试纯字典嵌套
+        print("   🔄 尝试传纯字典嵌套...")
+        try:
+            dict_b = base_kwargs.copy()
+            dict_b['rdt'] = {'hidden_size': 2048}
+            model_b_dict = ModelClass(dict_b)
+            # 检查...
+            for m in model_b_dict.modules():
+                if isinstance(m, nn.Linear):
+                    print(f"   [字典结果] 实际 Linear 维度: {m.out_features}")
+                    break
+        except Exception as e2:
+             print(f"   ❌ 字典也报错: {e2}")
+
+if __name__ == "__main__":
+    run_test()

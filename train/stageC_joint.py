@@ -196,8 +196,8 @@ print(f"Flash Attention Enabled: {torch.backends.cuda.flash_sdp_enabled()}")
 # 添加项目根目录到路径，确保能导入 models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.fusion_encoder import FusionEncoder
-from models.rdt_model import RDTWrapper
+from model.fusion_encoder import FusionEncoder
+from model.rdt_model import RDTWrapper
 from utils.dataset_loader import RobotDataset
 from losses.consistency_loss import compute_consistency_loss
 

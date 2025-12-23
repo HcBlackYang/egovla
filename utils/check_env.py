@@ -59,8 +59,8 @@ def check_env():
     print(f"\n[4] 验证项目模块加载:")
     try:
         sys.path.append(os.getcwd()) # 确保能扫描到 models 目录
-        from models.fusion_encoder import FusionEncoder
-        from models.rdt_model import RDTWrapper
+        from model.fusion_encoder import FusionEncoder
+        from model.rdt_model import RDTWrapper
         
         print("   - 正在尝试加载 FusionEncoder (可能需要几秒)...")
         # 尝试实例化，检查显存能否加载
