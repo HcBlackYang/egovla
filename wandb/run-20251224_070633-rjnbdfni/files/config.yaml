@@ -1,0 +1,94 @@
+_wandb:
+    value:
+        cli_version: 0.22.3
+        e:
+            ys7qic34lve8c0zml0fjc3qt8fldm8m8:
+                args:
+                    - --data_root
+                    - /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5
+                    - --output_dir
+                    - /yanghaochuan/checkpoints
+                    - --stage_b_ckpt
+                    - /yanghaochuan/checkpoints/1223stageB_papercup.pt
+                    - --batch_size
+                    - "16"
+                    - --epochs
+                    - "50"
+                    - --pred_horizon
+                    - "64"
+                    - --use_wandb
+                codePath: train/stageC_joint.py
+                codePathLocal: train/stageC_joint.py
+                cpu_count: 128
+                cpu_count_logical: 128
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "1007792590848"
+                        used: "370473930752"
+                email: 1607834283@qq.com
+                executable: /opt/conda/envs/ego/bin/python
+                git:
+                    commit: 4fa87aba4119385ed57e882b5ab3b34431b0b2e5
+                    remote: https://github.com/HcBlackYang/egovla.git
+                gpu: NVIDIA A800-SXM4-80GB
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A800-SXM4-80GB
+                      uuid: GPU-c1d7c624-a393-befa-3807-7e00602d65ca
+                host: dvpv4n1nlf65d-0
+                memory:
+                    total: "811278602240"
+                os: Linux-3.10.0-1160.el7.x86_64-x86_64-with-glibc2.31
+                program: /yanghaochuan/projects/train/stageC_joint.py
+                python: CPython 3.10.19
+                root: /yanghaochuan/projects
+                startedAt: "2025-12-24T07:06:33.300670Z"
+                writerId: ys7qic34lve8c0zml0fjc3qt8fldm8m8
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 63
+                - 71
+                - 83
+                - 98
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 63
+                - 71
+                - 83
+                - 98
+            "3":
+                - 13
+                - 16
+                - 61
+            "4": 3.10.19
+            "5": 0.22.3
+            "6": 4.57.1
+            "12": 0.22.3
+            "13": linux-x86_64
+batch_size:
+    value: 16
+data_root:
+    value: /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5
+epochs:
+    value: 50
+output_dir:
+    value: /yanghaochuan/checkpoints
+pred_horizon:
+    value: 64
+stage_b_ckpt:
+    value: /yanghaochuan/checkpoints/1223stageB_papercup.pt
+use_wandb:
+    value: true

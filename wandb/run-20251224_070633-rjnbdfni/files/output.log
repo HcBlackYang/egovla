@@ -1,0 +1,80 @@
+🚀 WandB logging enabled.
+=== Stage C Joint Training ===
+Loading Models...
+[FusionEncoder] Loading VideoMAE from: /yanghaochuan/models/VideoMAEv2-Large
+INFO:transformers_modules.VideoMAEv2_hyphen_Large.modeling_videomaev2:Model config: {'img_size': 224, 'patch_size': 16, 'in_chans': 3, 'num_classes': 0, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'mlp_ratio': 4, 'qkv_bias': True, 'qk_scale': None, 'drop_rate': 0.0, 'attn_drop_rate': 0.0, 'drop_path_rate': 0.0, 'norm_layer': 'nn.LayerNorm', 'layer_norm_eps': 1e-06, 'init_values': 0.0, 'use_learnable_pos_emb': False, 'tubelet_size': 2, 'use_mean_pooling': False, 'with_cp': False, 'num_frames': 16, 'cos_attn': False}
+Some weights of VideoMAEv2 were not initialized from the model checkpoint at /yanghaochuan/models/VideoMAEv2-Large and are newly initialized: ['model.norm.bias', 'model.norm.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+[FusionEncoder] Loading T5 Encoder from: /yanghaochuan/models/flan-t5-large
+[FusionEncoder] Aligning heads to teacher dimension: 1152
+Loading Stage B: /yanghaochuan/checkpoints/1223stageB_papercup.pt
+/yanghaochuan/projects/train/stageC_joint.py:320: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(args.stage_b_ckpt, map_location='cpu')
+INFO:[RDTWrapper]:🛠️ Init RDT: hidden_size=2048, horizon=65
+INFO:[RDTWrapper]:🔍 Actual Initialized Dimension: 2048
+INFO:[RDTWrapper]:Loading weights from /yanghaochuan/models/rdt-1b/pytorch_model.bin...
+/yanghaochuan/projects/model/rdt_model.py:762: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(weights_path, map_location="cpu")
+INFO:[RDTWrapper]:Weights loaded. Missing keys: 3
+INFO:[RDTWrapper]:✅ x_pos_embed successfully loaded.
+Loading RDT weights with auto-slicing...
+/yanghaochuan/projects/train/stageC_joint.py:339: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(rdt_file, map_location='cpu')
+Applying LoRA...
+Loading Dataset from /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5
+[Dataset] Loading Tokenizer from /yanghaochuan/models/flan-t5-large...
+You are using the default legacy behaviour of the <class 'transformers.models.t5.tokenization_t5.T5Tokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565
+[Dataset] Loaded normalization stats.
+[Dataset] Loaded 28404 samples from 1223pick_up_the_paper_cup.hdf5
+>>> Training Started <<<
+Epoch 0 [0/1775] Loss: 1.0473 (Diff: 1.0015 Cons: 0.4578)
+Traceback (most recent call last):0m Encoding video...
+🎥 Video sample uploaded to WandB.
+Epoch 0 [10/1775] Loss: 1.0418 (Diff: 0.9965 Cons: 0.4529)
+  File "/yanghaochuan/projects/train/stageC_joint.py", line 493, in <module>
+    train_stage_c(args)
+  File "/yanghaochuan/projects/train/stageC_joint.py", line 412, in train_stage_c
+    loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
+  File "/yanghaochuan/projects/losses/consistency_loss.py", line 53, in compute_consistency_loss
+    out_single = fusion_encoder(video_single, text, state, ff)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/yanghaochuan/projects/model/fusion_encoder.py", line 232, in forward
+    text_outputs = self.text_encoder(input_ids=text_tokens)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/models/t5/modeling_t5.py", line 1932, in forward
+    encoder_outputs = self.encoder(
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/models/t5/modeling_t5.py", line 1100, in forward
+    layer_outputs = layer_module(
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/modeling_layers.py", line 94, in __call__
+    return super().__call__(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/models/t5/modeling_t5.py", line 737, in forward
+    hidden_states = self.layer[-1](hidden_states)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/models/t5/modeling_t5.py", line 342, in forward
+    forwarded_states = self.layer_norm(hidden_states)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/transformers/models/t5/modeling_t5.py", line 256, in forward
+    hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+KeyboardInterrupt
