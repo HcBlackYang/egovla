@@ -127,11 +127,28 @@ class RealTimeAgent:
             self.policy.rdt_model = get_peft_model(self.policy.rdt_model, peft_config)
             
             ckpt_c = torch.load(STAGE_C_PATH, map_location=self.device)
+            # if 'rdt_state_dict' in ckpt_c:
+            #     self.policy.load_state_dict(ckpt_c['rdt_state_dict'], strict=False)
+            # else:
+            #     self.policy.load_state_dict(ckpt_c, strict=False)
+            # print("[Agent] ✅ All weights loaded.")
+
             if 'rdt_state_dict' in ckpt_c:
                 self.policy.load_state_dict(ckpt_c['rdt_state_dict'], strict=False)
             else:
                 self.policy.load_state_dict(ckpt_c, strict=False)
+                
+            # 2. 【核心修复】尝试从 Stage C 加载 Encoder
+            if 'encoder_state_dict' in ckpt_c:
+                print("[Agent] ✅ Found updated Encoder weights in Stage C checkpoint. Loading...")
+                self.encoder.load_state_dict(ckpt_c['encoder_state_dict'], strict=False)
+            else:
+                print("[Agent] ⚠️ No Encoder weights found in Stage C. Falling back to Stage B...")
+                ckpt_b = torch.load(STAGE_B_PATH, map_location=self.device)
+                self.encoder.load_state_dict(ckpt_b['encoder_state_dict'], strict=False)
+            
             print("[Agent] ✅ All weights loaded.")
+            
 
             print("[Agent] Compiling FusionEncoder...")
             torch._dynamo.config.suppress_errors = True

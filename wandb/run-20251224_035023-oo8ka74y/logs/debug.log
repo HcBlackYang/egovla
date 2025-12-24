@@ -1,0 +1,39 @@
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_setup.py:_flush():81] Current SDK version is 0.22.3
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_setup.py:_flush():81] Configure stats pid to 4846
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_setup.py:_flush():81] Loading settings from /root/.config/wandb/settings
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_setup.py:_flush():81] Loading settings from /yanghaochuan/projects/wandb/settings
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_init.py:setup_run_log_directory():706] Logging user logs to /yanghaochuan/projects/wandb/run-20251224_035023-oo8ka74y/logs/debug.log
+2025-12-24 03:50:23,700 INFO    MainThread:4846 [wandb_init.py:setup_run_log_directory():707] Logging internal logs to /yanghaochuan/projects/wandb/run-20251224_035023-oo8ka74y/logs/debug-internal.log
+2025-12-24 03:50:23,701 INFO    MainThread:4846 [wandb_init.py:init():833] calling init triggers
+2025-12-24 03:50:23,701 INFO    MainThread:4846 [wandb_init.py:init():838] wandb.init called with sweep_config: {}
+config: {'data_root': '/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5', 'output_dir': '/yanghaochuan/checkpoints', 'stage_b_ckpt': '/yanghaochuan/checkpoints/1223stageB_papercup.pt', 'batch_size': 16, 'epochs': 50, 'pred_horizon': 64, 'use_wandb': True, '_wandb': {}}
+2025-12-24 03:50:23,701 INFO    MainThread:4846 [wandb_init.py:init():881] starting backend
+2025-12-24 03:50:23,913 INFO    MainThread:4846 [wandb_init.py:init():884] sending inform_init request
+2025-12-24 03:50:23,935 INFO    MainThread:4846 [wandb_init.py:init():892] backend started and connected
+2025-12-24 03:50:23,937 INFO    MainThread:4846 [wandb_init.py:init():962] updated telemetry
+2025-12-24 03:50:23,997 INFO    MainThread:4846 [wandb_init.py:init():986] communicating run to backend with 90.0 second timeout
+2025-12-24 03:50:25,021 INFO    MainThread:4846 [wandb_init.py:init():1033] starting run threads in backend
+2025-12-24 03:50:25,170 INFO    MainThread:4846 [wandb_run.py:_console_start():2506] atexit reg
+2025-12-24 03:50:25,170 INFO    MainThread:4846 [wandb_run.py:_redirect():2354] redirect: wrap_raw
+2025-12-24 03:50:25,170 INFO    MainThread:4846 [wandb_run.py:_redirect():2423] Wrapping output streams.
+2025-12-24 03:50:25,171 INFO    MainThread:4846 [wandb_run.py:_redirect():2446] Redirects installed.
+2025-12-24 03:50:25,175 INFO    MainThread:4846 [wandb_init.py:init():1073] run started, returning control to user process
+2025-12-24 03:52:04,948 ERROR   asyncio_0 :4846 [util.py:get_module():252] [no run ID] Error importing optional module moviepy.video.io.ImageSequenceClip
+Traceback (most recent call last):
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/util.py", line 218, in import_module_lazy
+    return sys.modules[name]
+KeyError: 'moviepy.video.io.ImageSequenceClip'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/util.py", line 247, in get_module
+    return import_module_lazy(name)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/util.py", line 220, in import_module_lazy
+    spec = importlib.util.find_spec(name)
+  File "/opt/conda/envs/ego/lib/python3.10/importlib/util.py", line 94, in find_spec
+    parent = __import__(parent_name, fromlist=['__path__'])
+ModuleNotFoundError: No module named 'moviepy'
+2025-12-24 03:52:05,663 INFO    wandb-AsyncioManager-main:4846 [service_client.py:_forward_responses():80] Reached EOF.
+2025-12-24 03:52:05,664 INFO    wandb-AsyncioManager-main:4846 [mailbox.py:close():137] Closing mailbox, abandoning 1 handles.

@@ -1,0 +1,57 @@
+🚀 WandB logging enabled.
+=== Stage C Joint Training ===
+Loading Models...
+[FusionEncoder] Loading VideoMAE from: /yanghaochuan/models/VideoMAEv2-Large
+INFO:transformers_modules.VideoMAEv2_hyphen_Large.modeling_videomaev2:Model config: {'img_size': 224, 'patch_size': 16, 'in_chans': 3, 'num_classes': 0, 'embed_dim': 1024, 'depth': 24, 'num_heads': 16, 'mlp_ratio': 4, 'qkv_bias': True, 'qk_scale': None, 'drop_rate': 0.0, 'attn_drop_rate': 0.0, 'drop_path_rate': 0.0, 'norm_layer': 'nn.LayerNorm', 'layer_norm_eps': 1e-06, 'init_values': 0.0, 'use_learnable_pos_emb': False, 'tubelet_size': 2, 'use_mean_pooling': False, 'with_cp': False, 'num_frames': 16, 'cos_attn': False}
+Some weights of VideoMAEv2 were not initialized from the model checkpoint at /yanghaochuan/models/VideoMAEv2-Large and are newly initialized: ['model.norm.bias', 'model.norm.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+[FusionEncoder] Loading T5 Encoder from: /yanghaochuan/models/flan-t5-large
+[FusionEncoder] Aligning heads to teacher dimension: 1152
+Loading Stage B: /yanghaochuan/checkpoints/1223stageB_papercup.pt
+/yanghaochuan/projects/train/stageC_joint.py:320: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  ckpt = torch.load(args.stage_b_ckpt, map_location='cpu')
+INFO:[RDTWrapper]:🛠️ Init RDT: hidden_size=2048, horizon=65
+INFO:[RDTWrapper]:🔍 Actual Initialized Dimension: 2048
+INFO:[RDTWrapper]:Loading weights from /yanghaochuan/models/rdt-1b/pytorch_model.bin...
+/yanghaochuan/projects/model/rdt_model.py:762: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(weights_path, map_location="cpu")
+INFO:[RDTWrapper]:Weights loaded. Missing keys: 3
+INFO:[RDTWrapper]:✅ x_pos_embed successfully loaded.
+Loading RDT weights with auto-slicing...
+/yanghaochuan/projects/train/stageC_joint.py:339: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(rdt_file, map_location='cpu')
+Applying LoRA...
+Loading Dataset from /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5
+[Dataset] Loading Tokenizer from /yanghaochuan/models/flan-t5-large...
+You are using the default legacy behaviour of the <class 'transformers.models.t5.tokenization_t5.T5Tokenizer'>. This is expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you. If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it means, and thoroughly read the reason why this was added as explained in https://github.com/huggingface/transformers/pull/24565
+[Dataset] Loaded normalization stats.
+[Dataset] Loaded 28404 samples from 1223pick_up_the_paper_cup.hdf5
+>>> Training Started <<<
+Epoch 0 [0/1775] Loss: 1.0551 (Diff: 1.0094 Cons: 0.4576)
+[34m[1mwandb[0m: [32m[41mERROR[0m wandb.Video requires moviepy when passing raw data. Install with "pip install wandb[media]"
+Traceback (most recent call last):
+  File "/yanghaochuan/projects/train/stageC_joint.py", line 493, in <module>
+    train_stage_c(args)
+  File "/yanghaochuan/projects/train/stageC_joint.py", line 458, in train_stage_c
+    "input_video": wandb.Video((combined_view * 255).astype(np.uint8), fps=4, format="gif", caption=f"E{epoch}-S{i}: {mask_type}")
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/data_types/video.py", line 179, in __init__
+    printer_asyncio.run_async_with_spinner(
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/lib/printer_asyncio.py", line 48, in run_async_with_spinner
+    return asyncer.run(_loop_run_with_spinner)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+  File "/opt/conda/envs/ego/lib/python3.10/concurrent/futures/_base.py", line 458, in result
+    return self.__get_result()
+  File "/opt/conda/envs/ego/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
+    raise self._exception
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/lib/asyncio_manager.py", line 219, in _wrap
+    return await fn()
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/lib/printer_asyncio.py", line 43, in _loop_run_with_spinner
+    res = await asyncio.get_running_loop().run_in_executor(None, func)
+  File "/opt/conda/envs/ego/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/sdk/data_types/video.py", line 193, in encode
+    mpy = util.get_module(
+  File "/opt/conda/envs/ego/lib/python3.10/site-packages/wandb/util.py", line 254, in get_module
+    raise wandb.Error(required)
+wandb.errors.errors.Error: wandb.Video requires moviepy when passing raw data. Install with "pip install wandb[media]"

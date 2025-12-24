@@ -1,0 +1,43 @@
+{
+  "os":  "Linux-3.10.0-1160.el7.x86_64-x86_64-with-glibc2.31",
+  "python":  "CPython 3.10.19",
+  "startedAt":  "2025-12-24T03:50:23.691671Z",
+  "args":  [
+    "--use_wandb"
+  ],
+  "program":  "/yanghaochuan/projects/train/stageC_joint.py",
+  "codePath":  "train/stageC_joint.py",
+  "codePathLocal":  "train/stageC_joint.py",
+  "git":  {
+    "remote":  "https://github.com/HcBlackYang/egovla.git",
+    "commit":  "e46aed6347e33c19660dbc1208d2cb2c8a626690"
+  },
+  "email":  "1607834283@qq.com",
+  "root":  "/yanghaochuan/projects",
+  "host":  "5gs1gcudg4shq-0",
+  "executable":  "/opt/conda/envs/ego/bin/python",
+  "cpu_count":  128,
+  "cpu_count_logical":  128,
+  "gpu":  "NVIDIA A800-SXM4-80GB",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1007792590848",
+      "used":  "583126257664"
+    }
+  },
+  "memory":  {
+    "total":  "811278602240"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA A800-SXM4-80GB",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-e7f175ea-1d38-93c4-2d07-fc1a938dc9d2"
+    }
+  ],
+  "cudaVersion":  "12.4",
+  "writerId":  "3shile379myed2hsetjv3klz5ypuo9we"
+}
