@@ -652,7 +652,7 @@ def train_stage_c(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/1225checkpoints')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/1229checkpoints')
     parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/1223stageB_papercup.pt')
     
     # 物理 Batch Size (显存限制，保持 16)

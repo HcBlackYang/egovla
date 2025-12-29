@@ -37,7 +37,7 @@ echo "Starting training..."
 $PYTHON_EXE -u train/stageC_joint.py \
     --data_root /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5 \
     --output_dir /yanghaochuan/checkpoints \
-    --stage_b_ckpt /yanghaochuan/checkpoints/1223stageB_papercup.pt \
+    --stage_b_ckpt /yanghaochuan/checkpoints/1226stageB_step_1500.pt \
     --batch_size 32 \
     --gradient_accumulation_steps 2 \
     --max_train_steps 10000 \

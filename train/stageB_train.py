@@ -266,7 +266,8 @@ def train_stage_b(args):
     temporal_fn = TemporalConsistencyLoss()
     
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
-    loss_weights = {"distill":1.0, "decouple":0.5, "consistency":1.0}
+    # loss_weights = {"distill":1.0, "decouple":0.5, "consistency":1.0}
+    loss_weights = {"distill":1.0, "decouple":0.5, "consistency":0.1}
 
     # ====================================================
     # 4. 精准断点续训逻辑 (Step-Based Resume)
