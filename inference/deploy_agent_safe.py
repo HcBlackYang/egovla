@@ -21,7 +21,7 @@ STATS_PATH = "/yanghaochuan/data/1223dataset_stats.json"
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
 
 # [修改点] 不再需要 Stage B 路径，直接用 Stage C
-STAGE_C_PATH = '/yanghaochuan/checkpoints/checkpoint_step_2500.pt'
+STAGE_C_PATH = '/yanghaochuan/checkpoints/checkpoint_step_3200.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

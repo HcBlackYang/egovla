@@ -85,6 +85,7 @@ python train/stageB_train.py \
   --batch_size 48 \
   --epochs 5
 python train/stageB_train.py --data_root /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5 --output_dir /yanghaochuan/checkpoints --batch_size 16 --epochs 5
+python train/stageB_train.py --data_root /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5 --output_dir /yanghaochuan/checkpoints --resume_from_checkpoint /yanghaochuan/checkpoints/1226stageB_step_7000.pt --batch_size 16 --gradient_accumulation_steps 4 --max_train_steps 10000 --checkpointing_steps 500 --use_wandb --num_workers 16
 ```
 ### 3. Stage C: 联合训练 (Joint Training)
 这是最关键的步骤。启用 Modality Dropout 和 Action Chunking。
