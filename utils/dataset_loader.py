@@ -1,3 +1,163 @@
+# # utils/dataset_loader.py
+# import torch
+# from torch.utils.data import Dataset
+# import h5py
+# import numpy as np
+# import os
+# import json
+# from transformers import T5Tokenizer
+
+# class RobotDataset(Dataset):
+#     def __init__(self, hdf5_path, 
+#                  window_size=16, 
+#                  pred_horizon=16, # <--- 新增: 预测未来步数 (Chunk Size)
+#                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
+#                  stats_path="/yanghaochuan/data/1223dataset_stats.json"): 
+        
+#         self.hdf5_path = hdf5_path
+#         self.window_size = window_size
+#         self.pred_horizon = pred_horizon
+        
+#         # === 1. 加载 Tokenizer ===
+#         print(f"[Dataset] Loading Tokenizer from {tokenizer_path}...")
+#         try:
+#             self.tokenizer = T5Tokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+#         except:
+#             print("[Dataset] Local tokenizer failed, trying default...")
+#             self.tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-large")
+        
+#         # === 2. 加载统计量 (用于 Z-Score 归一化) ===
+#         if not os.path.exists(stats_path):
+#              raise FileNotFoundError(f"❌ 找不到统计文件: {stats_path}。请先运行 utils/compute_stats.py！")
+        
+#         with open(stats_path, 'r') as f:
+#             stats = json.load(f)
+        
+#         self.action_mean = torch.tensor(stats['action_mean']).float()
+#         self.action_std = torch.tensor(stats['action_std']).float()
+        
+#         # [安全措施] 防止 std 太小导致除法爆炸
+#         self.action_std = torch.maximum(self.action_std, torch.tensor(1e-2))
+        
+#         print(f"[Dataset] Loaded normalization stats.")
+
+#         # === 3. 扫描数据 ===
+#         self.indices = []
+#         with h5py.File(hdf5_path, 'r') as f:
+#             if 'data' not in f:
+#                  raise ValueError(f"HDF5结构错误: {hdf5_path} 中没有 'data' 组")
+
+#             self.demos = list(f['data'].keys())
+#             for demo_key in self.demos:
+#                 try:
+#                     demo_grp = f['data'][demo_key]
+#                     if 'actions' not in demo_grp: continue
+                    
+#                     total_len = demo_grp['actions'].shape[0]
+#                     has_teacher = 'teacher_siglip' in demo_grp
+                    
+#                     # 确保长度足够: 历史窗口(16) + 预测窗口(16)
+#                     min_len = window_size + pred_horizon
+                    
+#                     if total_len > min_len:
+#                         instruction = demo_grp.attrs.get('language_instruction', 'do nothing')
+#                         # 遍历每一个可能的起始点
+#                         for i in range(total_len - min_len): 
+#                             self.indices.append({
+#                                 'demo_key': demo_key,
+#                                 'start_idx': i,
+#                                 'instruction': instruction,
+#                                 'has_teacher': has_teacher
+#                             })
+#                 except Exception as e:
+#                     print(f"Skipping {demo_key}: {e}")
+        
+#         print(f"[Dataset] Loaded {len(self.indices)} samples from {os.path.basename(hdf5_path)}")
+
+#     def __len__(self):
+#         return len(self.indices)
+
+#     def __getitem__(self, idx):
+#         meta = self.indices[idx]
+#         demo_key = meta['demo_key']
+#         start = meta['start_idx']
+        
+#         # 计算读取长度: 历史16帧 + 未来16帧
+#         read_len = self.window_size + self.pred_horizon
+        
+#         with h5py.File(self.hdf5_path, 'r') as f:
+#             demo_grp = f['data'][demo_key]
+            
+#             # --- 1. Video (读取双摄) ---
+#             # 假设主摄 key 为 'agentview_image'，手腕 key 为 'robot0_eye_in_hand_image'
+#             # 如果您的 key 不一样，请在这里修改
+#             main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
+#             wrist_key = 'robot0_eye_in_hand_image'
+            
+#             # 读取主摄
+#             main_seq = demo_grp['obs'][main_key][start : start + self.window_size]
+#             main_tensor = torch.tensor(main_seq).float().permute(0, 3, 1, 2) / 255.0 # [T, 3, H, W]
+            
+#             # 读取手腕
+#             wrist_seq = demo_grp['obs'][wrist_key][start : start + self.window_size]
+#             wrist_tensor = torch.tensor(wrist_seq).float().permute(0, 3, 1, 2) / 255.0 # [T, 3, H, W]
+            
+#             # 堆叠双摄: [2, T, 3, H, W] -> permute -> [2, 3, T, H, W]
+#             # 这里的顺序 View 0 是 Main, View 1 是 Wrist
+#             video = torch.stack([main_tensor, wrist_tensor], dim=0).permute(0, 2, 1, 3, 4)
+            
+#             # --- 2. State & Action (读取 Chunk) ---
+#             state_seq_raw = demo_grp['obs']['robot0_joint_pos'][start : start + read_len]
+            
+#             # 补齐逻辑
+#             if state_seq_raw.shape[0] < read_len:
+#                 pad_len = read_len - state_seq_raw.shape[0]
+#                 last_frame = state_seq_raw[-1:]
+#                 state_seq_raw = np.concatenate([state_seq_raw, np.tile(last_frame, (pad_len, 1))], axis=0)
+
+#             # Z-Score 归一化
+#             state_seq_tensor = torch.tensor(state_seq_raw).float()
+#             state_seq_norm = (state_seq_tensor - self.action_mean) / self.action_std
+            
+#             # 切分: Input (历史) vs Target (未来 Chunk)
+#             state_input = state_seq_norm[:self.window_size]  # [16, 8]
+#             action_target = state_seq_norm[self.window_size : self.window_size + self.pred_horizon] # [16, 8]
+
+#             # --- 3. First Frame (双摄) ---
+#             main_first = demo_grp['obs'][main_key][0]
+#             wrist_first = demo_grp['obs'][wrist_key][0]
+            
+#             main_first_t = torch.tensor(main_first).float().permute(2, 0, 1) / 255.0
+#             wrist_first_t = torch.tensor(wrist_first).float().permute(2, 0, 1) / 255.0
+            
+#             # [2, 3, H, W]
+#             first_frame = torch.stack([main_first_t, wrist_first_t], dim=0)
+
+#             # --- 4. Teachers ---
+#             if meta['has_teacher']:
+#                 teacher_siglip = torch.tensor(demo_grp['teacher_siglip'][start : start + self.window_size]).float()
+#                 teacher_exo = torch.tensor(demo_grp['teacher_exo'][start : start + self.window_size]).float()
+#             else:
+#                 teacher_siglip = torch.zeros(self.window_size, 1152)
+#                 teacher_exo = torch.zeros(self.window_size, 1152)
+
+#         # Tokenize
+#         cmd = meta['instruction']
+#         if isinstance(cmd, bytes): cmd = cmd.decode('utf-8')
+#         text_tokens = self.tokenizer(
+#             cmd, return_tensors="pt", padding="max_length", max_length=16, truncation=True
+#         ).input_ids.squeeze(0)
+
+#         return {
+#             "video": video,             # Shape: [2, 3, 16, 224, 224]
+#             "state": state_input,       # Shape: [16, 8]
+#             "action_target": action_target, # Shape: [16, 8] (Sequence)
+#             "text_tokens": text_tokens,
+#             "first_frame": first_frame, # Shape: [2, 3, 224, 224]
+#             "teacher_siglip": teacher_siglip,
+#             "teacher_exo": teacher_exo
+#         }
+
 # utils/dataset_loader.py
 import torch
 from torch.utils.data import Dataset
@@ -10,9 +170,11 @@ from transformers import T5Tokenizer
 class RobotDataset(Dataset):
     def __init__(self, hdf5_path, 
                  window_size=16, 
-                 pred_horizon=16, # <--- 新增: 预测未来步数 (Chunk Size)
+                 pred_horizon=16,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/1223dataset_stats.json"): 
+                 stats_path="/yanghaochuan/data/1223dataset_stats.json",
+                 # [可选] 手动指定哪些 demo key 是 Anchor (Type B)
+                 anchor_demo_names=None): 
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
@@ -35,19 +197,52 @@ class RobotDataset(Dataset):
         
         self.action_mean = torch.tensor(stats['action_mean']).float()
         self.action_std = torch.tensor(stats['action_std']).float()
-        
-        # [安全措施] 防止 std 太小导致除法爆炸
         self.action_std = torch.maximum(self.action_std, torch.tensor(1e-2))
         
-        print(f"[Dataset] Loaded normalization stats.")
-
-        # === 3. 扫描数据 ===
+        # === 3. 扫描数据并建立 Anchor 缓存 (Asymmetric Context Logic) ===
         self.indices = []
+        self.anchor_cache = {}  # {instruction_string: first_frame_tensor}
+        
+        print(f"[Dataset] Scanning HDF5 for valid samples and Anchors...")
+        
         with h5py.File(hdf5_path, 'r') as f:
             if 'data' not in f:
                  raise ValueError(f"HDF5结构错误: {hdf5_path} 中没有 'data' 组")
 
             self.demos = list(f['data'].keys())
+            
+            # --- 第一遍扫描：收集 Anchors (Type B) ---
+            # 策略：对于每个唯一的指令，我们选取第一个遇到的 Demo 作为 Anchor (假设它是标准的 Type B)
+            # 或者如果有 anchor_demo_names，则优先使用
+            
+            instructions_seen = set()
+            
+            for demo_key in self.demos:
+                demo_grp = f['data'][demo_key]
+                # 获取指令
+                instruction = demo_grp.attrs.get('language_instruction', 'do nothing')
+                if isinstance(instruction, bytes): instruction = instruction.decode('utf-8')
+                
+                # 如果这个指令还没有 Anchor，或者这个 Demo 就在白名单里
+                # 这里简单起见：每个任务的第一个 Demo 被视为 Anchor
+                if instruction not in instructions_seen:
+                    main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
+                    wrist_key = 'robot0_eye_in_hand_image'
+                    
+                    if main_key in demo_grp['obs'] and wrist_key in demo_grp['obs']:
+                        # 提取首帧
+                        m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
+                        w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
+                        
+                        # [2, 3, H, W]
+                        anchor_frame = torch.stack([m0, w0], dim=0)
+                        
+                        self.anchor_cache[instruction] = anchor_frame
+                        instructions_seen.add(instruction)
+            
+            print(f"[Dataset] Identified {len(self.anchor_cache)} unique task anchors.")
+
+            # --- 第二遍扫描：构建训练样本索引 ---
             for demo_key in self.demos:
                 try:
                     demo_grp = f['data'][demo_key]
@@ -55,13 +250,12 @@ class RobotDataset(Dataset):
                     
                     total_len = demo_grp['actions'].shape[0]
                     has_teacher = 'teacher_siglip' in demo_grp
-                    
-                    # 确保长度足够: 历史窗口(16) + 预测窗口(16)
                     min_len = window_size + pred_horizon
                     
                     if total_len > min_len:
                         instruction = demo_grp.attrs.get('language_instruction', 'do nothing')
-                        # 遍历每一个可能的起始点
+                        if isinstance(instruction, bytes): instruction = instruction.decode('utf-8')
+
                         for i in range(total_len - min_len): 
                             self.indices.append({
                                 'demo_key': demo_key,
@@ -72,7 +266,7 @@ class RobotDataset(Dataset):
                 except Exception as e:
                     print(f"Skipping {demo_key}: {e}")
         
-        print(f"[Dataset] Loaded {len(self.indices)} samples from {os.path.basename(hdf5_path)}")
+        print(f"[Dataset] Loaded {len(self.indices)} samples.")
 
     def __len__(self):
         return len(self.indices)
@@ -81,57 +275,50 @@ class RobotDataset(Dataset):
         meta = self.indices[idx]
         demo_key = meta['demo_key']
         start = meta['start_idx']
+        instruction = meta['instruction']
         
-        # 计算读取长度: 历史16帧 + 未来16帧
         read_len = self.window_size + self.pred_horizon
         
         with h5py.File(self.hdf5_path, 'r') as f:
             demo_grp = f['data'][demo_key]
             
-            # --- 1. Video (读取双摄) ---
-            # 假设主摄 key 为 'agentview_image'，手腕 key 为 'robot0_eye_in_hand_image'
-            # 如果您的 key 不一样，请在这里修改
+            # --- 1. Video (读取真实的 Type A 视野) ---
+            # 保持其“糟糕”的状态，用于训练修正能力
             main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
             wrist_key = 'robot0_eye_in_hand_image'
             
-            # 读取主摄
             main_seq = demo_grp['obs'][main_key][start : start + self.window_size]
-            main_tensor = torch.tensor(main_seq).float().permute(0, 3, 1, 2) / 255.0 # [T, 3, H, W]
-            
-            # 读取手腕
             wrist_seq = demo_grp['obs'][wrist_key][start : start + self.window_size]
-            wrist_tensor = torch.tensor(wrist_seq).float().permute(0, 3, 1, 2) / 255.0 # [T, 3, H, W]
             
-            # 堆叠双摄: [2, T, 3, H, W] -> permute -> [2, 3, T, H, W]
-            # 这里的顺序 View 0 是 Main, View 1 是 Wrist
-            video = torch.stack([main_tensor, wrist_tensor], dim=0).permute(0, 2, 1, 3, 4)
+            main_t = torch.tensor(main_seq).float().permute(0, 3, 1, 2) / 255.0
+            wrist_t = torch.tensor(wrist_seq).float().permute(0, 3, 1, 2) / 255.0
             
-            # --- 2. State & Action (读取 Chunk) ---
+            # [2, 3, 16, H, W] -> [2, 16, 3, H, W] (取决于你的 encoder 需求，这里保持你之前的 permute)
+            # 你之前的代码是: torch.stack(...).permute(0, 2, 1, 3, 4) -> [2, 3, 16, H, W]
+            video = torch.stack([main_t, wrist_t], dim=0).permute(0, 2, 1, 3, 4)
+            
+            # --- 2. State & Action ---
             state_seq_raw = demo_grp['obs']['robot0_joint_pos'][start : start + read_len]
-            
-            # 补齐逻辑
             if state_seq_raw.shape[0] < read_len:
                 pad_len = read_len - state_seq_raw.shape[0]
-                last_frame = state_seq_raw[-1:]
-                state_seq_raw = np.concatenate([state_seq_raw, np.tile(last_frame, (pad_len, 1))], axis=0)
+                state_seq_raw = np.concatenate([state_seq_raw, np.tile(state_seq_raw[-1:], (pad_len, 1))], axis=0)
 
-            # Z-Score 归一化
             state_seq_tensor = torch.tensor(state_seq_raw).float()
             state_seq_norm = (state_seq_tensor - self.action_mean) / self.action_std
             
-            # 切分: Input (历史) vs Target (未来 Chunk)
-            state_input = state_seq_norm[:self.window_size]  # [16, 8]
-            action_target = state_seq_norm[self.window_size : self.window_size + self.pred_horizon] # [16, 8]
+            state_input = state_seq_norm[:self.window_size]
+            action_target = state_seq_norm[self.window_size : self.window_size + self.pred_horizon]
 
-            # --- 3. First Frame (双摄) ---
-            main_first = demo_grp['obs'][main_key][0]
-            wrist_first = demo_grp['obs'][wrist_key][0]
-            
-            main_first_t = torch.tensor(main_first).float().permute(2, 0, 1) / 255.0
-            wrist_first_t = torch.tensor(wrist_first).float().permute(2, 0, 1) / 255.0
-            
-            # [2, 3, H, W]
-            first_frame = torch.stack([main_first_t, wrist_first_t], dim=0)
+            # --- 3. First Frame (Context Injection) ---
+            # 关键修改：如果有 Anchor，强行替换为 Anchor 的首帧 (完美视野)
+            # 这样模型学到的是：Video(Bad) + FirstFrame(Perfect) -> Action(Correct)
+            if instruction in self.anchor_cache:
+                first_frame = self.anchor_cache[instruction]
+            else:
+                # Fallback: 如果该任务没有 anchor，只能用自己的首帧
+                m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
+                w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
+                first_frame = torch.stack([m0, w0], dim=0)
 
             # --- 4. Teachers ---
             if meta['has_teacher']:
@@ -142,18 +329,16 @@ class RobotDataset(Dataset):
                 teacher_exo = torch.zeros(self.window_size, 1152)
 
         # Tokenize
-        cmd = meta['instruction']
-        if isinstance(cmd, bytes): cmd = cmd.decode('utf-8')
         text_tokens = self.tokenizer(
-            cmd, return_tensors="pt", padding="max_length", max_length=16, truncation=True
+            instruction, return_tensors="pt", padding="max_length", max_length=16, truncation=True
         ).input_ids.squeeze(0)
 
         return {
-            "video": video,             # Shape: [2, 3, 16, 224, 224]
-            "state": state_input,       # Shape: [16, 8]
-            "action_target": action_target, # Shape: [16, 8] (Sequence)
+            "video": video,
+            "state": state_input,
+            "action_target": action_target,
             "text_tokens": text_tokens,
-            "first_frame": first_frame, # Shape: [2, 3, 224, 224]
+            "first_frame": first_frame, # <--- Swapped Context
             "teacher_siglip": teacher_siglip,
             "teacher_exo": teacher_exo
         }
