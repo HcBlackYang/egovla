@@ -172,9 +172,7 @@ class RobotDataset(Dataset):
                  window_size=16, 
                  pred_horizon=16,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/1223dataset_stats.json",
-                 # [可选] 手动指定哪些 demo key 是 Anchor (Type B)
-                 anchor_demo_names=None): 
+                 stats_path="/yanghaochuan/data/1223dataset_stats.json"): 
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
@@ -199,9 +197,9 @@ class RobotDataset(Dataset):
         self.action_std = torch.tensor(stats['action_std']).float()
         self.action_std = torch.maximum(self.action_std, torch.tensor(1e-2))
         
-        # === 3. 扫描数据并建立 Anchor 缓存 (Asymmetric Context Logic) ===
+        # === 3. 扫描数据并建立 Anchor 缓存 (Index-Based Asymmetric Context) ===
         self.indices = []
-        self.anchor_cache = {}  # {instruction_string: first_frame_tensor}
+        self.anchor_bank = {}  # {demo_key: first_frame_tensor}
         
         print(f"[Dataset] Scanning HDF5 for valid samples and Anchors...")
         
@@ -211,36 +209,32 @@ class RobotDataset(Dataset):
 
             self.demos = list(f['data'].keys())
             
-            # --- 第一遍扫描：收集 Anchors (Type B) ---
-            # 策略：对于每个唯一的指令，我们选取第一个遇到的 Demo 作为 Anchor (假设它是标准的 Type B)
-            # 或者如果有 anchor_demo_names，则优先使用
-            
-            instructions_seen = set()
-            
+            # --- 第一遍扫描：收集所有 Type B (Anchors) ---
             for demo_key in self.demos:
                 demo_grp = f['data'][demo_key]
-                # 获取指令
-                instruction = demo_grp.attrs.get('language_instruction', 'do nothing')
-                if isinstance(instruction, bytes): instruction = instruction.decode('utf-8')
                 
-                # 如果这个指令还没有 Anchor，或者这个 Demo 就在白名单里
-                # 这里简单起见：每个任务的第一个 Demo 被视为 Anchor
-                if instruction not in instructions_seen:
+                # 优先读取 HDF5 中的属性标记
+                # 如果是旧数据没有标记，回退到 demo_idx % 5 == 0 的逻辑
+                data_type = demo_grp.attrs.get("data_type", None)
+                if data_type is None:
+                    idx = int(demo_key.split('_')[1])
+                    if idx % 5 == 0:
+                        data_type = "type_b"
+                
+                # 如果被标记为 Type B，则存入 Anchor 银行
+                if data_type == "type_b":
                     main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
                     wrist_key = 'robot0_eye_in_hand_image'
                     
                     if main_key in demo_grp['obs'] and wrist_key in demo_grp['obs']:
-                        # 提取首帧
                         m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
                         w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
                         
                         # [2, 3, H, W]
                         anchor_frame = torch.stack([m0, w0], dim=0)
-                        
-                        self.anchor_cache[instruction] = anchor_frame
-                        instructions_seen.add(instruction)
+                        self.anchor_bank[demo_key] = anchor_frame
             
-            print(f"[Dataset] Identified {len(self.anchor_cache)} unique task anchors.")
+            print(f"[Dataset] Identified {len(self.anchor_bank)} anchors (Type B episodes).")
 
             # --- 第二遍扫描：构建训练样本索引 ---
             for demo_key in self.demos:
@@ -282,8 +276,7 @@ class RobotDataset(Dataset):
         with h5py.File(self.hdf5_path, 'r') as f:
             demo_grp = f['data'][demo_key]
             
-            # --- 1. Video (读取真实的 Type A 视野) ---
-            # 保持其“糟糕”的状态，用于训练修正能力
+            # --- 1. Video (读取 Type A 的真实“糟糕”视野) ---
             main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
             wrist_key = 'robot0_eye_in_hand_image'
             
@@ -293,8 +286,7 @@ class RobotDataset(Dataset):
             main_t = torch.tensor(main_seq).float().permute(0, 3, 1, 2) / 255.0
             wrist_t = torch.tensor(wrist_seq).float().permute(0, 3, 1, 2) / 255.0
             
-            # [2, 3, 16, H, W] -> [2, 16, 3, H, W] (取决于你的 encoder 需求，这里保持你之前的 permute)
-            # 你之前的代码是: torch.stack(...).permute(0, 2, 1, 3, 4) -> [2, 3, 16, H, W]
+            # [2, 16, 3, H, W] -> [2, 3, 16, H, W]
             video = torch.stack([main_t, wrist_t], dim=0).permute(0, 2, 1, 3, 4)
             
             # --- 2. State & Action ---
@@ -310,12 +302,21 @@ class RobotDataset(Dataset):
             action_target = state_seq_norm[self.window_size : self.window_size + self.pred_horizon]
 
             # --- 3. First Frame (Context Injection) ---
-            # 关键修改：如果有 Anchor，强行替换为 Anchor 的首帧 (完美视野)
-            # 这样模型学到的是：Video(Bad) + FirstFrame(Perfect) -> Action(Correct)
-            if instruction in self.anchor_cache:
-                first_frame = self.anchor_cache[instruction]
+            # 关键修改：按索引分组查找 Anchor
+            # 解析当前索引: "demo_12" -> 12
+            current_idx = int(demo_key.split('_')[1])
+            
+            # 计算归属的 Anchor 索引 (向下取整到最近的 5 的倍数)
+            # 例如: 12 -> 10,  14 -> 10,  15 -> 15
+            anchor_idx = (current_idx // 5) * 5
+            anchor_key = f"demo_{anchor_idx}"
+            
+            if anchor_key in self.anchor_bank:
+                # 命中缓存：使用对应的 Type B 首帧
+                first_frame = self.anchor_bank[anchor_key]
             else:
-                # Fallback: 如果该任务没有 anchor，只能用自己的首帧
+                # Fallback: 理论上不应该发生，除非 Type B 被过滤了
+                # 如果找不到，就用自己的首帧
                 m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
                 w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
                 first_frame = torch.stack([m0, w0], dim=0)
@@ -338,7 +339,7 @@ class RobotDataset(Dataset):
             "state": state_input,
             "action_target": action_target,
             "text_tokens": text_tokens,
-            "first_frame": first_frame, # <--- Swapped Context
+            "first_frame": first_frame, # <--- Swapped Context (Type B)
             "teacher_siglip": teacher_siglip,
             "teacher_exo": teacher_exo
         }
