@@ -72,8 +72,8 @@ pip install diffusers transformers timm einops h5py opencv-python accelerate pef
 
 ```Bash
 python utils/compute_stats.py \
-  --data_root /yanghaochuan/data/train_data.hdf5 \
-  --save_path /yanghaochuan/data/dataset_stats.json
+  --data_root /yanghaochuan/data/12pick_up_the_orange_ball.hdf5 \
+  --save_path /yanghaochuan/data/13dataset_stats.json
 ```
 ### 2. Stage B: 编码器预训练 (Optional but Recommended)
 训练 FusionEncoder 以对齐教师特征。这一步生成的权重将作为 Stage C 的初始化。

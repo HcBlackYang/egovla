@@ -556,16 +556,38 @@ def train_stage_c(args):
                 
                 # --- Loss Calculation ---
                 
-                # Loss 1: Action Diffusion Loss
-                loss_diff = F.mse_loss(pred_noise, noise)
+                # # Loss 1: Action Diffusion Loss
+                # loss_diff = F.mse_loss(pred_noise, noise)
                 
-                # Loss 2: Consistency Loss (Brain Completion)
-                # 使用原始 batch (包含未 Mask 的数据)，函数内部会自己处理 Student/Teacher 构建
+                # # Loss 2: Consistency Loss (Brain Completion)
+                # # 使用原始 batch (包含未 Mask 的数据)，函数内部会自己处理 Student/Teacher 构建
+                # loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
+                
+                # # Loss 3: Distillation Regularization (Don't forget semantics)
+                # # 强迫当前 Mask 状态下的 encoder_out 依然能恢复出全局语义
+                # # 这完全复用了 Stage B 的逻辑
+                # loss_distill_reg, _ = distill_fn(encoder_out, teacher_feats)
+
+
+                # 1. 改为 reduction='none' 以便手动加权
+                loss_diff_raw = F.mse_loss(pred_noise, noise, reduction='none') 
+                
+                # 2. 创建权重矩阵 (默认全是 1.0)
+                # shape: [Batch, Pred_Horizon, Action_Dim] -> [B, 64, 8]
+                loss_weights = torch.ones_like(loss_diff_raw)
+                
+                # 3. 给第 8 维 (索引 7) 施加 20 倍惩罚！
+                # 这会强迫模型必须精准预测夹爪动作，否则 Loss 会爆炸
+                loss_weights[:, :, 7] = 20.0  
+                
+                # 4. 计算加权后的均值
+                loss_diff = (loss_diff_raw * loss_weights).mean()
+                # =================================================================
+
+                # Loss 2: Consistency Loss
                 loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
                 
-                # Loss 3: Distillation Regularization (Don't forget semantics)
-                # 强迫当前 Mask 状态下的 encoder_out 依然能恢复出全局语义
-                # 这完全复用了 Stage B 的逻辑
+                # Loss 3: Distillation Regularization
                 loss_distill_reg, _ = distill_fn(encoder_out, teacher_feats)
                 
                 # 🌟 组合 Loss
@@ -621,7 +643,7 @@ def train_stage_c(args):
 
                 # --- Checkpoint 保存 ---
                 if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"stageC_step_{global_step}.pt")
+                    save_path = os.path.join(args.output_dir, f"12stageC_step_{global_step}.pt")
                     torch.save({
                         'epoch': epoch,
                         'global_step': global_step, 
@@ -651,16 +673,16 @@ def train_stage_c(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/1223pick_up_the_paper_cup.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/1229checkpoints')
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/1223stageB_papercup.pt')
+    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/12pick_up_the_orange_ball.hdf5')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/13checkpoints')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/12stageB_step_2000.pt')
     
     # 物理 Batch Size (显存限制，保持 16)
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     
     # === 关键控制参数 ===
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=4, 
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=2, 
                         help="Number of updates steps to accumulate before update pass. (Effective BS = batch_size * this)")
     
     parser.add_argument('--max_train_steps', type=int, default=10000, 

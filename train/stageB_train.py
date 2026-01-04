@@ -419,7 +419,7 @@ def train_stage_b(args):
 
                 # --- Checkpoint 保存 ---
                 if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"1226stageB_step_{global_step}.pt")
+                    save_path = os.path.join(args.output_dir, f"13stageB_step_{global_step}.pt")
                     torch.save({
                         'epoch': epoch,
                         'global_step': global_step,
@@ -431,7 +431,7 @@ def train_stage_b(args):
                 # --- 结束训练 ---
                 if global_step >= args.max_train_steps:
                     print(f"🎉 Reached target {args.max_train_steps} steps. Training Finished.")
-                    final_path = os.path.join(args.output_dir, f"stageB_final.pt")
+                    final_path = os.path.join(args.output_dir, f"13stageB_final.pt")
                     torch.save(model.state_dict(), final_path) # Final 只存权重方便加载
                     
                     if args.use_wandb and HAS_WANDB: wandb.finish()
@@ -447,13 +447,13 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='/yanghaochuan/checkpoints')
     
     # 训练超参
-    parser.add_argument('--batch_size', type=int, default=24) 
+    parser.add_argument('--batch_size', type=int, default=16) 
     parser.add_argument('--num_workers', type=int, default=16)
     
     # Step-based 控制参数
-    parser.add_argument('--max_train_steps', type=int, default=20000, help="Total training steps")
-    parser.add_argument('--checkpointing_steps', type=int, default=2000, help="Save every X steps")
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Simulate larger batch size")
+    parser.add_argument('--max_train_steps', type=int, default=10000, help="Total training steps")
+    parser.add_argument('--checkpointing_steps', type=int, default=500, help="Save every X steps")
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help="Simulate larger batch size")
     
     # 杂项
     parser.add_argument('--resume_from_checkpoint', type=str, default=None)

@@ -35,9 +35,9 @@ PYTHON_EXE="/opt/conda/envs/ego/bin/python"
 echo "Starting training..."
 
 $PYTHON_EXE -u train/stageC_joint.py \
-    --data_root /yanghaochuan/data/1223pick_up_the_paper_cup.hdf5 \
+    --data_root /yanghaochuan/data/12pick_up_the_orange_ball.hdf5 \
     --output_dir /yanghaochuan/checkpoints \
-    --stage_b_ckpt /yanghaochuan/checkpoints/1226stageB_step_1500.pt \
+    --stage_b_ckpt /yanghaochuan/checkpoints/12stageB_step_2000.pt \
     --batch_size 32 \
     --gradient_accumulation_steps 2 \
     --max_train_steps 10000 \
