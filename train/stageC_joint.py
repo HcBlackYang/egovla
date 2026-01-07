@@ -576,10 +576,6 @@ def train_stage_c(args):
                 # shape: [Batch, Pred_Horizon, Action_Dim] -> [B, 64, 8]
                 loss_weights = torch.ones_like(loss_diff_raw)
                 
-                # 3. 给第 8 维 (索引 7) 施加 20 倍惩罚！
-                # 这会强迫模型必须精准预测夹爪动作，否则 Loss 会爆炸
-                loss_weights[:, :, 7] = 20.0  
-                
                 # 4. 计算加权后的均值
                 loss_diff = (loss_diff_raw * loss_weights).mean()
                 # =================================================================
@@ -674,8 +670,8 @@ def train_stage_c(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/12pick_up_the_orange_ball.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/13checkpoints')
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/12stageB_step_2000.pt')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/16checkpoints')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/16stageB_step_2000.pt')
     
     # 物理 Batch Size (显存限制，保持 16)
     parser.add_argument('--batch_size', type=int, default=32)

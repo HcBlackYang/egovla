@@ -419,7 +419,7 @@ def train_stage_b(args):
 
                 # --- Checkpoint 保存 ---
                 if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"13stageB_step_{global_step}.pt")
+                    save_path = os.path.join(args.output_dir, f"16stageB_step_{global_step}.pt")
                     torch.save({
                         'epoch': epoch,
                         'global_step': global_step,
@@ -431,7 +431,7 @@ def train_stage_b(args):
                 # --- 结束训练 ---
                 if global_step >= args.max_train_steps:
                     print(f"🎉 Reached target {args.max_train_steps} steps. Training Finished.")
-                    final_path = os.path.join(args.output_dir, f"13stageB_final.pt")
+                    final_path = os.path.join(args.output_dir, f"16stageB_final.pt")
                     torch.save(model.state_dict(), final_path) # Final 只存权重方便加载
                     
                     if args.use_wandb and HAS_WANDB: wandb.finish()

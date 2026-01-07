@@ -172,7 +172,7 @@ class RobotDataset(Dataset):
                  window_size=16, 
                  pred_horizon=64,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/13dataset_stats.json"): 
+                 stats_path="/yanghaochuan/data/16dataset_stats.json"): 
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
