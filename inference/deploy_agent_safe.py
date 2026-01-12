@@ -217,7 +217,6 @@
 #         safe_actions = self.safety.clip_actions(denormalized_actions)
 #         return safe_actions.tolist()
 
-# inference/deploy_agent_safe.py
 import torch
 import cv2
 import json
@@ -237,9 +236,11 @@ from model.rdt_model import RDTWrapper
 # === 基础路径配置 ===
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
-STATS_PATH = "/yanghaochuan/data/16dataset_stats.json" # 确保这里读取的是新生成的 stats
+# 使用新的 16dataset_stats (对应新的采样策略)
+STATS_PATH = "/yanghaochuan/data/16dataset_stats.json"
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
-STAGE_C_PATH = '/yanghaochuan/16checkpoints_finetune/12stageC_step_3800.pt' # 记得改成你新训练的 checkpoint
+# 使用 ForeSight 训练出的 Checkpoint
+STAGE_C_PATH = '/yanghaochuan/16checkpoints_finetune/12stageC_step_3800.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -261,6 +262,11 @@ class RealTimeAgent:
         self.device = DEVICE
         self.safety = SafetyController() 
         self.pred_horizon = 64
+
+        # === 🟢 ForeSight 核心参数 ===
+        self.history_len = 500       # Buffer 长度：覆盖过去 2-3 秒
+        self.model_input_frames = 6 # 模型实际输入：均匀采样 6 帧
+        # ===========================
 
         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
         try:
@@ -293,9 +299,10 @@ class RealTimeAgent:
         self._init_models()
         self._init_scheduler()
         
-        self.window_size = 16
-        self.video_buffer = deque(maxlen=self.window_size)
-        self.state_buffer = deque(maxlen=self.window_size)
+        # 初始化 Buffer (长度为 history_len)
+        self.video_buffer = deque(maxlen=self.history_len)
+        self.state_buffer = deque(maxlen=self.history_len)
+        
         self.first_frame_tensor = None
         self.text_tokens = None 
         self.default_prompt = "pick up the orange ball"
@@ -330,6 +337,7 @@ class RealTimeAgent:
         self.video_buffer.clear()
         self.state_buffer.clear()
         
+        # 处理首帧 (Anchor)
         ff_resized = cv2.resize(first_frame_img, (224, 224))
         ff_rgb = cv2.cvtColor(ff_resized, cv2.COLOR_BGR2RGB)
         wrist_tensor = torch.tensor(ff_rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
@@ -339,9 +347,10 @@ class RealTimeAgent:
         tokens = self.tokenizer(self.default_prompt, return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids
         self.text_tokens = tokens.to(self.device)
         
-        # 填满 buffer (冷启动)
+        # 填满 buffer (冷启动填充)
+        # 注意：这里我们填满 history_len，这样初始采样就是全是首帧
         video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0) 
-        for _ in range(self.window_size):
+        for _ in range(self.history_len):
             self.video_buffer.append(video_frame_unit) 
             
         if current_qpos is None: current_qpos = np.zeros(8)
@@ -349,16 +358,18 @@ class RealTimeAgent:
             if len(current_qpos) == 7: current_qpos = list(current_qpos) + [0.0]
             current_qpos = np.array(current_qpos, dtype=np.float32)
         norm_qpos = (current_qpos - self.action_mean) / self.action_std
-        for _ in range(self.window_size):
+        
+        for _ in range(self.history_len):
             self.state_buffer.append(norm_qpos)
 
     @torch.no_grad()
     def step(self, frames_list, current_qpos):
         """
-        :param frames_list: 包含 16 帧真实历史图像的列表 (List[np.array])
+        :param frames_list: 包含若干帧真实历史图像的列表 (通常是客户端发来的最新几帧)
         """
-        # 1. 刷新 Video Buffer (填入真实的 16 帧历史)
-        self.video_buffer.clear()
+        # 1. 更新 Video Buffer
+        # 注意：客户端可能发来 16 帧，也可能只发来最新 1 帧。
+        # 我们将它们全部 append 到长 Buffer 中。
         for frame in frames_list:
             frame_resized = cv2.resize(frame, (224, 224))
             frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
@@ -368,37 +379,56 @@ class RealTimeAgent:
             combined_frame = torch.stack([main_fake, wrist_tensor], dim=0)
             self.video_buffer.append(combined_frame)
         
-        while len(self.video_buffer) < self.window_size:
-            self.video_buffer.append(self.video_buffer[-1])
-
-        # 2. State Preprocess
+        # 2. State Preprocess & Update
         if len(current_qpos) == 7:
             current_qpos = list(current_qpos) + [0.0]
         
         qpos_np = np.array(current_qpos, dtype=np.float32)
         norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
         
-        self.state_buffer.clear()
-        for _ in range(self.window_size):
-            self.state_buffer.append(norm_qpos_np)
+        # 更新状态 Buffer (只存最新的即可，或者存历史)
+        # 这里简单起见，append 最新的
+        self.state_buffer.append(norm_qpos_np)
         
-        # 3. Batch Construction
-        vid_t = torch.stack(list(self.video_buffer)).to(self.device)
-        vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0) 
-        state_t = torch.tensor(np.array(list(self.state_buffer)), dtype=torch.float32).unsqueeze(0).to(self.device)
+        # =========================================================
+        # 🟢 核心：均匀采样 (Uniform Sampling)
+        # =========================================================
+        curr_len = len(self.video_buffer)
+        # 从 Buffer 中均匀选取 model_input_frames (6) 帧
+        # np.linspace 生成均匀间隔的索引
+        indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
+        
+        # 取出选中的帧
+        buffer_list = list(self.video_buffer)
+        selected_frames = [buffer_list[i] for i in indices]
+        
+        # 堆叠 -> [6, 2, 3, 224, 224]
+        vid_t = torch.stack(selected_frames).to(self.device)
+        # 调整维度 -> [1, 2, 3, 6, 224, 224] (Batch=1, T=6)
+        vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0)
+        
+        # State: 取当前最新的状态即可 (因为 FusionEncoder 只用 state[:, -1, :])
+        # 为了格式统一，我们构造一个 [1, 1, 8] 的 Tensor
+        state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
         
         # 4. Inference
         self.scheduler.set_timesteps(self.inference_steps)
         with autocast('cuda', dtype=torch.bfloat16):
+            # (1) 获取视觉特征 (包含 ForeSight 的未来预测)
             features = self.encoder(vid_t, self.text_tokens, state_t, self.first_frame_tensor)
-            # 手动注入 State
+            
+            # (2) 手动注入当前 State (确保 RDT 拿到的是最新本体感知)
+            # state_t 是 [1, 1, 8], 取 [:, -1, :] 得到 [1, 8]
             features["state"] = state_t[:, -1, :] 
             
             latents = torch.randn(1, self.pred_horizon, 8, device=self.device) 
+            
             for t in self.scheduler.timesteps:
                 model_input = self.scheduler.scale_model_input(latents, t)
                 t_tensor = torch.tensor([t], device=self.device)
+                
                 noise_pred = self.policy(model_input, t_tensor, features)
+                
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
             
         normalized_actions = latents[0].float()
@@ -408,27 +438,18 @@ class RealTimeAgent:
         # =========================================================
         # 🚨 [关键修复] 夹爪二值化 (Thresholding)
         # =========================================================
-        # 假设夹爪在第 8 维 (index 7)
-        # 计算该维度的物理中点 (基于你之前生成的 Stats)
-        gripper_midpoint = self.action_mean[7] 
-        
-        # 读取当前预测的夹爪值
-        raw_gripper_pred = denormalized_actions[:, 7]
-        
-        # 1. 定义物理极限 (直接填你跑出来的数值)
-        GRIPPER_OPEN_VAL = 0.0804  # 张开
-        GRIPPER_CLOSE_VAL = 0.0428 # 闭合 (或者稍微小一点 0.04 以确保抓紧)
-        GRIPPER_THRESHOLD = 0.0616 # 阈值
+        # 定义物理极限
+        GRIPPER_OPEN_VAL = 0.0804  
+        GRIPPER_CLOSE_VAL = 0.0428 
+        GRIPPER_THRESHOLD = 0.0616 
 
-        # 2. 获取模型预测的原始物理值
+        # 获取原始预测值
         raw_gripper_pred = denormalized_actions[:, 7]
 
-        # 3. 二值化判断
-        # 大于阈值 -> 设为 Open
-        # 小于阈值 -> 设为 Close
+        # 二值化判断
         binary_gripper = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
         
-        # 4. 覆盖回去
+        # 覆盖回去
         denormalized_actions[:, 7] = binary_gripper
         
         print(f"   >>> [Gripper] Raw: {raw_gripper_pred[0]:.4f} -> Binary: {binary_gripper[0]:.4f}", end='\r')

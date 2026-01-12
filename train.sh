@@ -20,7 +20,7 @@ echo "📂 Working Directory: $(pwd)"
 
 # === 3. 解释器与数据路径 (集中配置，方便修改) ===
 PYTHON_EXE="/opt/conda/envs/ego/bin/python"
-DATA_ROOT="/yanghaochuan/data/12pick_up_the_orange_ball.hdf5"
+DATA_ROOT="/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5"
 OUTPUT_DIR="/yanghaochuan/checkpoints"
 STAGE_A_CKPT="/yanghaochuan/checkpoints/stageA_final.pt"
 
