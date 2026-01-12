@@ -404,7 +404,8 @@ from losses.distillation_loss import DistillationLoss
 # === 路径配置 ===
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
-STATS_PATH = '/yanghaochuan/data/1223dataset_stats.json'
+# 🟢 请确保这里指向正确的统计文件
+STATS_PATH = '/yanghaochuan/data/1223dataset_stats.json' 
 
 def train_stage_c(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -417,49 +418,70 @@ def train_stage_c(args):
     if args.use_wandb and HAS_WANDB:
         wandb.init(
             project="RDT-StageC-Joint",
-            name=f"ForeSight_step{args.max_train_steps}_{int(time.time())}",
+            name=f"ForeSight_StageC_{int(time.time())}",
             config=vars(args),
             resume="allow"
         )
     
-    print(f"=== ForeSight VLA Training (Stage C) ===")
+    print(f"=== ForeSight VLA Training (Stage C: Policy Learning) ===")
     
     # 1. 模型加载
     print("Loading Models...")
+    # 确保 teacher_dim 和 rdt_dim 与 Stage B 一致
     fusion_encoder = FusionEncoder(backbone_path=VIDEO_MAE_PATH, teacher_dim=1152, rdt_dim=768).to(device)
     
+    # 加载 Stage B 预训练权重 (World Model)
     if args.stage_b_ckpt and os.path.exists(args.stage_b_ckpt):
-        print(f"Loading Stage B: {args.stage_b_ckpt}")
+        print(f"Loading Stage B (World Model): {args.stage_b_ckpt}")
         ckpt = torch.load(args.stage_b_ckpt, map_location='cpu')
-        state_dict = ckpt['encoder_state_dict'] if 'encoder_state_dict' in ckpt else ckpt
+        
+        # 兼容只保存了 state_dict 或完整 checkpoint 的情况
+        if 'model_state_dict' in ckpt:
+            state_dict = ckpt['model_state_dict']
+        elif 'encoder_state_dict' in ckpt:
+            state_dict = ckpt['encoder_state_dict']
+        else:
+            state_dict = ckpt
+            
+        # 去除 module. 前缀 (如果是 DDP 训练保存的)
         new_state_dict = {}
         for k, v in state_dict.items():
             if k.startswith("module."): new_state_dict[k[7:]] = v
             else: new_state_dict[k] = v
-        fusion_encoder.load_state_dict(new_state_dict, strict=False)
+            
+        msg = fusion_encoder.load_state_dict(new_state_dict, strict=False)
+        print(f"Stage B Loaded. Missing keys: {len(msg.missing_keys)}")
+    else:
+        print("⚠️ Warning: No Stage B checkpoint loaded! Training from scratch (Not Recommended).")
     
+    # 冻结 VideoMAE Backbone，微调其他部分
+    # 注意：这里我们让 Encoder 处于 eval 模式 (BN 不更新)，但参数 requires_grad=True (权重微调)
     fusion_encoder.eval() 
     for param in fusion_encoder.parameters(): param.requires_grad = True 
     for param in fusion_encoder.backbone.parameters(): param.requires_grad = False
     if fusion_encoder.text_encoder:
         for p in fusion_encoder.text_encoder.parameters(): p.requires_grad = False
 
+    # 加载 RDT Policy
     rdt_wrapper = RDTWrapper(action_dim=8, model_path=RDT_PATH, pred_horizon=args.pred_horizon).to(device)
     
+    # RDT 权重加载
     if os.path.exists(RDT_PATH) or os.path.exists(os.path.join(RDT_PATH, "pytorch_model.bin")):
         rdt_file = RDT_PATH if os.path.isfile(RDT_PATH) else os.path.join(RDT_PATH, "pytorch_model.bin")
         if os.path.exists(rdt_file):
-            print("Loading RDT weights...")
+            print("Loading RDT pretrained weights...")
             state_dict = torch.load(rdt_file, map_location='cpu')
             rdt_wrapper.rdt_model.load_state_dict(state_dict, strict=False)
 
-    print("Applying LoRA...")
+    # LoRA 配置
+    print("Applying LoRA to RDT...")
     peft_config = LoraConfig(
         r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "linear"], 
         lora_dropout=0.05, bias="none"
     )
     rdt_wrapper.rdt_model = get_peft_model(rdt_wrapper.rdt_model, peft_config)
     
+    # 优化器配置：RDT 学习率稍高，Encoder 学习率极低 (微调)
     params = [
         {'params': filter(lambda p: p.requires_grad, rdt_wrapper.parameters()), 'lr': 1e-4},
         {'params': filter(lambda p: p.requires_grad, fusion_encoder.parameters()), 'lr': 1e-5}
@@ -470,10 +492,16 @@ def train_stage_c(args):
 
     # 3. 数据加载
     print(f"Loading Dataset from {args.data_root}")
-    dataset = RobotDataset(hdf5_path=args.data_root, window_size=16, pred_horizon=args.pred_horizon, stats_path=STATS_PATH)
+    # 🟢 [关键修改] window_size 必须改为 6，与 Stage B 保持一致！
+    dataset = RobotDataset(
+        hdf5_path=args.data_root, 
+        window_size=6,             # <--- Modified: Match Stage B
+        pred_horizon=args.pred_horizon, 
+        stats_path=STATS_PATH
+    )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
-    # 4. 续训
+    # 4. 续训逻辑
     global_step = 0
     start_epoch = 0
     resume_batch_idx = 0
@@ -491,6 +519,8 @@ def train_stage_c(args):
 
     # 5. 训练循环
     print(">>> Training Started <<<")
+    
+    # 无限 Epoch 循环，由 max_train_steps 终止
     total_epochs = 999999 
     
     for epoch in range(start_epoch, total_epochs):
@@ -499,62 +529,76 @@ def train_stage_c(args):
         for i, batch in enumerate(loader):
             if epoch == start_epoch and i < resume_batch_idx: continue
 
-            video = batch['video'].to(device, non_blocking=True)
+            # 数据搬运
+            video = batch['video'].to(device, non_blocking=True) # [B, 3, 6, H, W]
             state = batch['state'].to(device, non_blocking=True)
             text = batch['text_tokens'].to(device, non_blocking=True)
             ff = batch['first_frame'].to(device, non_blocking=True)
             actions = batch['action_target'].to(device, non_blocking=True)
-
-            # 🟢 [ForeSight 新增] 未来目标
+            
+            # 🟢 [ForeSight] 未来目标
             future_exo_target = batch['future_exo_target'].to(device, non_blocking=True)
 
-            # Teacher Features
+            # Teacher Features (Distillation)
             real_siglip = batch['teacher_siglip'].to(device, non_blocking=True)
             real_exo = batch['teacher_exo'].to(device, non_blocking=True)
             siglip_target = torch.mean(real_siglip, dim=1)
             exo_target = torch.mean(real_exo, dim=1)
             teacher_feats = {"siglip_features": siglip_target, "exo_features": exo_target}
 
-            # Modality Dropout
+            # Modality Dropout (随机 Mask 模拟推理时的不确定性)
             rand_val = torch.rand(1).item()
             video_input = video.clone()
             ff_input = ff.clone()
             
             if rand_val < 0.7: 
-                video_input[:, 0] = 0.0
+                video_input[:, 0] = 0.0 # Mask Main Camera
                 ff_input[:, 0] = 0.0
             elif rand_val < 0.8: 
-                video_input[:, 1] = 0.0
+                video_input[:, 1] = 0.0 # Mask Wrist Camera
                 ff_input[:, 1] = 0.0
             
             with autocast('cuda', dtype=torch.bfloat16):
-                # 1. Forward
+                # 1. Encoder Forward
+                # 这里的 out 包含 'e_t' (70 tokens) 和 'wm_latents' (6 latents)
                 encoder_out = fusion_encoder(video_input, text, state, ff_input)
                 
-                # e_t 是序列 [B, 7, 768]
-                e_t = encoder_out['e_t']
-                # 🟢 [ForeSight] 预测的未来 Latents
-                wm_pred = encoder_out['wm_latents']
+                e_t = encoder_out['e_t']         # [B, 70, 768] -> 给 RDT
+                wm_pred = encoder_out['wm_latents'] # [B, 6, 1152] -> 给 WM Loss
                 
-                # 2. RDT Forward
+                # 2. RDT Forward (Action Generation)
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (actions.shape[0],), device=device).long()
                 noise = torch.randn_like(actions)
                 noisy_actions = noise_scheduler.add_noise(actions, noise, timesteps)
                 
+                # Condition 传入 e_t 和 当前 state
                 conditions = {"e_t": e_t, "state": state[:, -1, :]}
                 pred_noise = rdt_wrapper(noisy_actions, timesteps, conditions)
                 
                 # --- Loss Calculation ---
+                
+                # Loss 1: Action Diffusion Loss
                 loss_diff = F.mse_loss(pred_noise, noise)
                 
-                # 🟢 [ForeSight] World Model Loss
-                # 强制 Student 预测未来 Teacher Latents
-                loss_wm = F.mse_loss(wm_pred, future_exo_target)
+                # Loss 2: 🟢 [ForeSight] World Model Loss (MSE + Cosine)
+                # 必须与 Stage B 保持一致，防止微调时破坏 Latent 结构
+                l_wm_mse = F.mse_loss(wm_pred, future_exo_target)
                 
+                wm_pred_norm = F.normalize(wm_pred, dim=-1)
+                target_norm = F.normalize(future_exo_target, dim=-1)
+                l_wm_cos = (1.0 - (wm_pred_norm * target_norm).sum(dim=-1)).mean()
+                
+                loss_wm = l_wm_mse + 0.5 * l_wm_cos
+                
+                # Loss 3: Regularization (Consistency & Distill)
                 loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
                 loss_distill_reg, _ = distill_fn(encoder_out, teacher_feats)
                 
-                # 🌟 总 Loss (WM 权重 0.5)
+                # 🌟 总 Loss
+                # Diff: 1.0 (主任务)
+                # WM: 0.5 (强约束，保持预测能力)
+                # Cons: 0.1 (辅助)
+                # Distill: 0.05 (防漂移)
                 total_loss = loss_diff + 0.5 * loss_wm + 0.1 * loss_cons + 0.05 * loss_distill_reg
                 total_loss = total_loss / args.gradient_accumulation_steps
 
@@ -568,7 +612,7 @@ def train_stage_c(args):
                 
                 if global_step % 10 == 0:
                     real_loss = total_loss.item() * args.gradient_accumulation_steps
-                    print(f"Step {global_step} | Loss: {real_loss:.4f} | Act: {loss_diff.item():.4f} | WM: {loss_wm.item():.4f}")
+                    print(f"Step {global_step} | L: {real_loss:.4f} | Act: {loss_diff.item():.4f} | WM: {loss_wm.item():.4f} (Cos:{l_wm_cos.item():.3f})")
                     
                     tb_writer.add_scalar('Train/Total_Loss', real_loss, global_step)
                     if args.use_wandb and HAS_WANDB:
@@ -576,6 +620,7 @@ def train_stage_c(args):
                             "total_loss": real_loss,
                             "action_loss": loss_diff.item(),
                             "wm_loss": loss_wm.item(),
+                            "wm_cos": l_wm_cos.item(),
                             "cons_loss": loss_cons.item(),
                             "global_step": global_step,
                             "epoch": epoch
@@ -583,7 +628,7 @@ def train_stage_c(args):
 
                 # Checkpoint
                 if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"checkpoint_step_{global_step}.pt")
+                    save_path = os.path.join(args.output_dir, f"StageC_ForeSight_step_{global_step}.pt")
                     torch.save({
                         'epoch': epoch,
                         'global_step': global_step, 
@@ -595,8 +640,8 @@ def train_stage_c(args):
                     print(f"💾 Checkpoint saved: {save_path}")
 
                 if global_step >= args.max_train_steps:
-                    print(f"Training Finished.")
-                    final_path = os.path.join(args.output_dir, f"checkpoint_final.pt")
+                    print(f"🎉 Training Finished.")
+                    final_path = os.path.join(args.output_dir, f"StageC_ForeSight_final.pt")
                     torch.save({
                         'epoch': epoch,
                         'global_step': global_step,
@@ -612,8 +657,10 @@ def train_stage_c(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/12pick_up_the_orange_ball.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/16checkpoints')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/16checkpoints_finetune')
+    # 默认加载 Stage B (ForeSight Pretrained)
     parser.add_argument('--stage_b_ckpt', type=str, default=None)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)

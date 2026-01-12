@@ -326,37 +326,45 @@ class FusionEncoder(nn.Module):
         )
         
         self.norm1 = nn.LayerNorm(vision_dim)
-        
-        # === 🟢 [ForeSight 新增] 世界模型预测模块 ===
-        self.num_future_tokens = 6 # 对应 [0, 4, 8, 16, 32, 64]
-        
-        # 1. 定义可学习的 Future Queries
+        self.norm2 = nn.LayerNorm(vision_dim)
+
+        # === [New] 1. View Embedding (显式区分视角) ===
+        # 假设 0: Main, 1: Wrist
+        self.num_views = 2
+        self.view_embed = nn.Parameter(torch.zeros(1, self.num_views, 1, vision_dim))
+        nn.init.trunc_normal_(self.view_embed, std=0.02)
+
+        # === [New] 2. ForeSight Predictor (世界模型) ===
+        # 对应 offsets: [0, 2, 4, 8, 16, 32]
+        self.num_future_tokens = 6 
         self.future_queries = nn.Parameter(torch.randn(self.num_future_tokens, vision_dim))
         
-        # 2. 预测器 (Querying Future from Ego Memory)
+        # Decoder: Query=Future, Memory=Ego History
         self.predictor_layer = nn.TransformerDecoderLayer(d_model=vision_dim, nhead=16, batch_first=True)
         self.predictor = nn.TransformerDecoder(self.predictor_layer, num_layers=2)
         
-        # 3. 对齐头 (Align Head) -> 映射到 Teacher 维度 (1152) 用于 Loss
+        # === [New] 3. Heads Definition ===
+        
+        # A. 原始投影头 (用于 64 个 Spatial Token) -> RDT
+        self.projection_head = nn.Sequential(
+            nn.Dropout(p=0.2),
+            nn.Linear(vision_dim, rdt_dim)
+        )
+        
+        # B. 未来投影头 (用于 6 个 Future Latent) -> RDT
+        self.future_proj_head = nn.Sequential(
+            nn.LayerNorm(vision_dim),
+            nn.Dropout(0.2),
+            nn.Linear(vision_dim, rdt_dim)
+        )
+        
+        # C. 世界模型对齐头 (用于 Loss) -> Teacher Dim (1152)
         self.wm_align_head = nn.Sequential(
             nn.LayerNorm(vision_dim),
             nn.Linear(vision_dim, teacher_dim)
         )
         
-        # 4. 投影头 (To RDT 768) - 独立投影，不压缩序列
-        # 用于 Ego 当前特征
-        self.ego_proj_head = nn.Sequential(
-            nn.LayerNorm(vision_dim),
-            nn.Linear(vision_dim, rdt_dim)
-        )
-        # 用于 Future 特征
-        self.future_proj_head = nn.Sequential(
-            nn.LayerNorm(vision_dim),
-            nn.Dropout(0.2), # Dropout 加在这里
-            nn.Linear(vision_dim, rdt_dim)
-        )
-
-        # 辅助对齐头 (保持旧逻辑)
+        # D. 辅助对齐头
         self.semantic_align_head = nn.Sequential(
             nn.Dropout(p=0.2),
             nn.Linear(vision_dim, teacher_dim)
@@ -366,95 +374,35 @@ class FusionEncoder(nn.Module):
             nn.Linear(vision_dim, teacher_dim)
         )
 
-    # def extract_features(self, inputs):
-    #     model = self.backbone
-    #     if hasattr(model, 'model'): model = model.model
-    #     if hasattr(model, 'vit'): model = model.vit 
-        
-    #     if hasattr(model, 'blocks') and hasattr(model, 'patch_embed'):
-    #         try:
-    #             x = model.patch_embed(inputs)
-    #             if hasattr(model, 'pos_embed') and model.pos_embed is not None:
-    #                 pos_embed = model.pos_embed.to(x.device)
-    #                 if x.shape[1] == pos_embed.shape[1]:
-    #                     x = x + pos_embed
-    #                 else:
-    #                     x = x + pos_embed[:, :x.size(1), :]
-    #             for blk in model.blocks:
-    #                 x = blk(x)
-    #             if hasattr(model, 'norm') and model.norm is not None:
-    #                 x = model.norm(x)
-    #             return x 
-    #         except Exception:
-    #             pass
-    #     try:
-    #         outputs = self.backbone(inputs, output_hidden_states=True)
-    #         if hasattr(outputs, 'last_hidden_state'): return outputs.last_hidden_state
-    #         if hasattr(outputs, 'hidden_states') and outputs.hidden_states: return outputs.hidden_states[-1]
-    #         return outputs[0] if isinstance(outputs, (tuple, list)) else outputs
-    #     except TypeError:
-    #         return self.backbone(inputs)
     def extract_features(self, inputs):
-        """
-        VideoMAE 特征提取，支持动态时间窗口插值 (Temporal Interpolation)
-        inputs: [B, C, T, H, W] (例如 T=6)
-        """
+        """支持动态插值的 VideoMAE 特征提取"""
         model = self.backbone
-        # 兼容不同库版本的 VideoMAE 调用方式
         if hasattr(model, 'model'): model = model.model
         if hasattr(model, 'vit'): model = model.vit 
         
         if hasattr(model, 'blocks') and hasattr(model, 'patch_embed'):
             try:
-                # 1. Patch Embedding
-                # x shape: [B, N_patches, D] 
-                # 注意: VideoMAE 是 Tube Masking，N_patches = (T/2 * H/16 * W/16)
                 x = model.patch_embed(inputs)
-                
-                # 2. Positional Embedding 插值
                 if hasattr(model, 'pos_embed') and model.pos_embed is not None:
-                    # orig_pos_embed: [1, 1568, 1024] (对应 16 帧)
                     pos_embed = model.pos_embed
-                    
-                    # 检查是否需要插值
                     if x.shape[1] != pos_embed.shape[1]:
-                        # 计算 Token 数量差异
-                        # 假设 patch_embed 依然是把 Time 维度展平在 N_patches 里
-                        # 我们需要知道原始的 Time 维度是多少。
-                        # VideoMAE V2 Large: 16帧, 224x224, patch=14, tube=2
-                        # Tokens = (16/2) * (224/14) * (224/14) = 8 * 16 * 16 = 2048 (示例，具体看模型配置)
-                        
-                        # 简单且鲁棒的做法：直接按线性插值处理 N_patches 维度
-                        # 虽然这忽略了 3D 结构，但在微调阶段通常足够有效
+                        # 简单线性插值适配时间窗口变化
                         import torch.nn.functional as F
-                        
-                        # [1, N_orig, D] -> [1, D, N_orig]
                         pe_t = pos_embed.transpose(1, 2)
-                        
-                        # Interpolate to [1, D, N_current]
-                        # mode='linear' 对 1D 序列插值
                         pe_new = F.interpolate(pe_t, size=x.shape[1], mode='linear', align_corners=False)
-                        
-                        # [1, D, N_current] -> [1, N_current, D]
                         pos_embed = pe_new.transpose(1, 2)
                     
-                    # Add Pos Embed
                     x = x + pos_embed.to(x.device)
 
-                # 3. Transformer Blocks
                 for blk in model.blocks:
                     x = blk(x)
-                
-                # 4. Norm
                 if hasattr(model, 'norm') and model.norm is not None:
                     x = model.norm(x)
-                    
                 return x 
             except Exception as e:
-                print(f"Feature extraction failed: {e}")
+                # print(f"Feature extraction fallback: {e}")
                 pass
 
-        # Fallback (如果上面的逻辑失败)
         try:
             outputs = self.backbone(inputs, output_hidden_states=True)
             if hasattr(outputs, 'last_hidden_state'): return outputs.last_hidden_state
@@ -464,22 +412,35 @@ class FusionEncoder(nn.Module):
             return self.backbone(inputs)
 
     def forward(self, video_frames, text_tokens, state_info, first_frame_summary):
+        # 1. 维度处理 [B, V, C, T, H, W]
         B_dim = video_frames.shape[0]
         is_dual_view = False
         
         if video_frames.dim() == 6: 
             is_dual_view = True
             B, V, C, T, H, W = video_frames.shape
+            # [B, V, C, T, H, W] -> [B*V, C, T, H, W]
             video_frames = video_frames.view(B * V, C, T, H, W)
 
         if video_frames.shape[1] != 3 and video_frames.shape[2] == 3:
             video_frames = video_frames.permute(0, 2, 1, 3, 4)
-        T_video = video_frames.shape[2]
+        
+        # 2. 提取特征
+        tokens = self.extract_features(video_frames) # [B*V, N, D]
 
-        tokens = self.extract_features(video_frames)
+        # === 🟢 [核心修复] View Embedding 注入逻辑 ===
         if is_dual_view:
-            tokens = tokens.view(B, V * tokens.shape[1], tokens.shape[2])
+            # [B*V, N, D] -> [B, V, N, D]
+            tokens = tokens.view(B, V, tokens.shape[1], tokens.shape[2])
+            
+            # Add Embedding: [1, 2, 1, D] broadcast to [B, 2, N, D]
+            tokens = tokens + self.view_embed
+            
+            # 🟢 [修复] 使用 flatten 安全地合并前两个维度
+            # [B, V, N, D] -> [B, V*N, D]
+            tokens = tokens.flatten(1, 2)
 
+        # 3. 文本编码
         if self.text_encoder is not None:
             with torch.no_grad():
                 text_outputs = self.text_encoder(input_ids=text_tokens)
@@ -489,10 +450,12 @@ class FusionEncoder(nn.Module):
             text_embeds = torch.zeros(tokens.shape[0], 10, 1024, device=tokens.device)
             text_cond = torch.zeros(tokens.shape[0], 1024, device=tokens.device)
 
+        # 4. FiLM 调节
         tokens = self.film_t5(tokens, text_cond)
         state_cond = state_info[:, -1, :] 
         tokens = self.film_state(tokens, state_cond)
 
+        # 5. 首帧注意力
         if first_frame_summary.dim() == 5:
             ff_input = first_frame_summary.transpose(1, 2).repeat(1, 1, 2, 1, 1)
             with torch.no_grad():
@@ -503,42 +466,51 @@ class FusionEncoder(nn.Module):
         attn_output, _ = self.cross_attention_first_frame(query=tokens, key=first_frame_summary, value=first_frame_summary)
         tokens = self.norm1(tokens + attn_output)
 
+        # 6. 任务路由
         task_slots, confidence, background_context = self.routing_layer(tokens, first_frame_summary, text_embeds)
         weighted_task = torch.sum(task_slots * confidence, dim=1) # [B, D]
+        
+        # =========================================================
+        # 🟢 核心修改：非对称上下文 (64 Spatial + 6 Future)
+        # =========================================================
 
-        # === 🟢 [ForeSight 核心逻辑] ===
+        # --- A. 空间特征 (Ego Spatial) ---
+        # 注入 Task 信息并归一化
+        fused_seq = self.norm2(tokens + weighted_task.unsqueeze(1))
         
-        # 1. 准备 Memory (Ego History)
-        # 我们可以直接用 Routing 后的 task_slots 作为浓缩的 Memory，或者用原始 tokens
-        memory = tokens # [B, N, D]
+        # Adaptive Pooling: [B, N, D] -> [B, 64, D]
+        # 保持 64 个 Token 以保留空间细节
+        fused_pooled = torch.nn.functional.adaptive_avg_pool1d(fused_seq.transpose(1, 2), 64).transpose(1, 2)
         
-        # 2. 世界模型预测 (ForeSight Prediction)
+        # [B, 64, 768]
+        current_spatial_tokens = self.projection_head(fused_pooled)
+        
+        # --- B. 未来预测 (ForeSight Temporal) ---
+        # 使用全量 Token 作为 Memory，查询未来
+        memory = tokens 
         B = tokens.shape[0]
-        queries = self.future_queries.unsqueeze(0).expand(B, -1, -1) # [B, K=6, D]
+        queries = self.future_queries.unsqueeze(0).expand(B, -1, -1)
         
-        # Transformer Decoder: Query=Future, Memory=Ego_History
-        predicted_latents_raw = self.predictor(tgt=queries, memory=memory) # [B, 6, D]
+        # Predictor: [B, 6, D]
+        predicted_latents_raw = self.predictor(tgt=queries, memory=memory)
         
-        # 3. 生成用于 Loss 的 Latents (Teacher Dim 1152)
+        # 1. For Loss: [B, 6, 1152]
         wm_latents_for_loss = self.wm_align_head(predicted_latents_raw)
         
-        # 4. 生成用于 RDT 的 Tokens (RDT Dim 768)
-        # Ego Token: 使用 weighted_task (当前状态摘要)
-        ego_token_rdt = self.ego_proj_head(weighted_task.unsqueeze(1)) # [B, 1, 768]
+        # 2. For RDT: [B, 6, 768]
+        future_tokens_rdt = self.future_proj_head(predicted_latents_raw)
         
-        # Future Tokens: 投影预测结果
-        future_tokens_rdt = self.future_proj_head(predicted_latents_raw) # [B, 6, 768]
+        # --- C. 拼接 ---
+        # Total Length: 64 + 6 = 70
+        rdt_input_sequence = torch.cat([current_spatial_tokens, future_tokens_rdt], dim=1)
         
-        # 拼接序列 [Ego(1) + Future(6)] = 7 个 Token
-        rdt_input_sequence = torch.cat([ego_token_rdt, future_tokens_rdt], dim=1) # [B, 7, 768]
-        
-        # 辅助 Loss 头
+        # 辅助 Heads
         global_rep_for_heads = tokens.mean(dim=1)
         semantic_out = self.semantic_align_head(global_rep_for_heads)
         temporal_out = self.temporal_align_head(global_rep_for_heads)
 
         return {
-            "e_t": rdt_input_sequence,      # [B, 7, 768] -> Feed to RDT
+            "e_t": rdt_input_sequence,      # [B, 70, 768] -> Feed to RDT (Stage C)
             "wm_latents": wm_latents_for_loss, # [B, 6, 1152] -> Feed to Loss
             "task_slots": task_slots,
             "task_confidence": confidence,

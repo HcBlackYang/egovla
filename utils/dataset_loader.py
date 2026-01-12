@@ -205,7 +205,7 @@ class RobotDataset(Dataset):
         self.pred_horizon = pred_horizon
         
         # 🟢 定义稀疏预测步长 (World Model Anchors)
-        self.future_offsets = [0, 4, 8, 16, 32, 64]
+        self.future_offsets = [0, 2, 4, 8, 16, 32]
         
         # === 1. 加载 Tokenizer ===
         print(f"[Dataset] Loading Tokenizer from {tokenizer_path}...")
@@ -318,8 +318,22 @@ class RobotDataset(Dataset):
             
             # 读取视频 (HDF5 支持列表索引)
             # [6, H, W, 3]
-            main_frames = demo_grp['obs'][main_key][global_indices]
-            wrist_frames = demo_grp['obs'][wrist_key][global_indices]
+            # main_frames = demo_grp['obs'][main_key][global_indices]
+            # wrist_frames = demo_grp['obs'][wrist_key][global_indices]
+
+            # 🟢 [修复开始]：h5py 不支持重复索引，必须先去重再映射
+            # 1. 获取唯一索引和重建映射表
+            unique_indices, inverse_indices = np.unique(global_indices, return_inverse=True)
+            
+            # 2. 只读取唯一的帧 (h5py 要求严格递增，unique 自动排好序了)
+            # 读出来是 [U, H, W, 3]，其中 U <= window_size
+            unique_main_frames = demo_grp['obs'][main_key][unique_indices]
+            unique_wrist_frames = demo_grp['obs'][wrist_key][unique_indices]
+            
+            # 3. 在内存中重建完整序列 (包含重复帧)
+            # 使用 inverse_indices 把 [U, ...] 映射回 [6, ...]
+            main_frames = unique_main_frames[inverse_indices]
+            wrist_frames = unique_wrist_frames[inverse_indices]
             
             # 转 Tensor [6, 3, H, W]
             main_seq = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0

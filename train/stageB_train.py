@@ -333,7 +333,7 @@ VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 
 def train_stage_b(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"=== Stage B Training: Latent Dynamics Pre-training (ForeSight) ===")
+    print(f"=== Stage B Training: ForeSight Pre-training (World Model) ===")
     print(f"=== Mode: Step-Based | Target: {args.max_train_steps} Steps ===")
     
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -341,14 +341,13 @@ def train_stage_b(args):
 
     if args.use_wandb and HAS_WANDB:
         wandb.init(
-            project="ForeSight-StageB", # 修改项目名以区分
-            name=f"ForeSight_Pretrain_{int(time.time())}",
+            project="ForeSight-StageB", 
+            name=f"ForeSight_v2_{int(time.time())}",
             config=vars(args),
             resume="allow"
         )
 
     # 1. 初始化模型
-    # 注意：FusionEncoder 内部已经包含了 Predictor 的初始化
     model = FusionEncoder(backbone_path=VIDEO_MAE_PATH, teacher_dim=1152).to(device)
     
     if os.path.exists(args.stage_a_ckpt):
@@ -359,7 +358,7 @@ def train_stage_b(args):
     # 冻结 VideoMAE Backbone
     for param in model.backbone.parameters(): param.requires_grad = False
     
-    # 解冻部分 Backbone 层 (保持原逻辑)
+    # 解冻部分 Backbone 层
     layers_to_train = ["blocks.20", "blocks.21", "blocks.22", "blocks.23"] 
     count = 0
     for name, param in model.backbone.named_parameters():
@@ -368,8 +367,7 @@ def train_stage_b(args):
             count += 1
     print(f"Unfrozen {count} parameters in VideoMAE backbone.")
     
-    # 解冻 Adapter 和 Head (包含新的 Predictor)
-    # 凡是不属于 backbone 的，基本都是我们新加的层，都需要训练
+    # 解冻所有非 Backbone 的层 (包括 Predictor, Heads, ViewEmbed 等)
     for name, param in model.named_parameters():
         if "backbone" not in name:
             param.requires_grad = True
@@ -380,8 +378,8 @@ def train_stage_b(args):
 
     # 3. 数据加载
     print(f"Loading data from: {args.data_root}")
-    # 🟢 [ForeSight] 确保 dataset_loader 已更新支持 future_exo_target
-    dataset = RobotDataset(hdf5_path=args.data_root, window_size=16) 
+    # 确保 dataset_loader 已更新 offsets=[0, 2, 4, 8, 16, 32]
+    dataset = RobotDataset(hdf5_path=args.data_root, window_size=6) 
     
     loader = DataLoader(
         dataset, 
@@ -400,14 +398,10 @@ def train_stage_b(args):
     
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
     
-    # 🟢 [ForeSight] 调整权重
-    # Distill (Semantic): 1.0 -> 保持语义对齐
-    # WM (Dynamics): 1.0 -> 强力预训练预测头 (新加入)
-    # Decouple: 0.5 -> 去噪
-    # Consistency: 0.1 -> 时序平滑
+    # 权重调整
     loss_weights = {"distill": 1.0, "wm": 1.0, "decouple": 0.5, "consistency": 0.1}
 
-    # 5. 断点续训逻辑 (保持不变)
+    # 5. 断点续训逻辑
     global_step = 0
     start_epoch = 0
     resume_batch_idx = 0
@@ -442,28 +436,27 @@ def train_stage_b(args):
             text = batch['text_tokens'].to(device, non_blocking=True)
             ff = batch['first_frame'].to(device, non_blocking=True)
             
-            # 🟢 [ForeSight] 读取未来目标
+            # Future Target [B, 6, 1152]
             future_exo_target = batch['future_exo_target'].to(device, non_blocking=True)
 
-            # Teacher Features (Semantic)
+            # Semantic Teachers
             real_siglip = batch['teacher_siglip'].to(device, non_blocking=True)
             real_exo = batch['teacher_exo'].to(device, non_blocking=True)
             
-            # Masking 策略 (保持 Stage B 的 80% Masking 强迫脑补)
+            # Masking 策略 (保留 Stage B 的 80% Masking)
             mask_type_log = "Full_Input"
             mask_prob = 0.8 
             B = video.shape[0]
             should_mask = torch.rand(B, device=device) < mask_prob
             if should_mask.any():
                 video[should_mask, 0] = 0.0
-                ff[should_mask, 0] = 0.0 # 同步 Mask
+                ff[should_mask, 0] = 0.0 
                 mask_type_log = "Masked_Main"
 
             # 语义 Teacher 准备
             siglip_target = torch.mean(real_siglip, dim=1)
-            exo_target = torch.mean(real_exo, dim=1) # 这里的 exo_target 仅用于辅助语义对齐，不是预测目标
+            exo_target = torch.mean(real_exo, dim=1) 
             
-            # 噪声增强
             if model.training:
                 noise_scale = 0.01 
                 siglip_target += torch.randn_like(siglip_target) * noise_scale
@@ -475,19 +468,26 @@ def train_stage_b(args):
             with autocast('cuda', dtype=torch.bfloat16):
                 out = model(video, text, state, ff)
                 
-                # 1. 语义蒸馏 (Semantic Distillation)
+                # 1. 语义蒸馏
                 l_distill, _ = distill_fn(out, teacher_feats)
                 
-                # 🟢 [ForeSight] 2. 动力学预测 (Latent Dynamics Prediction)
-                # 计算预测的 wm_latents 与真实的 future_exo_target 之间的 Loss
-                wm_pred = out['wm_latents']
-                l_wm = F.mse_loss(wm_pred, future_exo_target)
+                # 2. 🟢 ForeSight WM Loss (MSE + Cosine)
+                wm_pred = out['wm_latents'] # [B, 6, 1152]
                 
-                # 3. 其他正则项
+                # MSE: 约束数值分布
+                l_wm_mse = F.mse_loss(wm_pred, future_exo_target)
+                
+                # Cosine: 约束语义方向 (高维特征关键)
+                wm_pred_norm = F.normalize(wm_pred, dim=-1)
+                target_norm = F.normalize(future_exo_target, dim=-1)
+                l_wm_cos = (1.0 - (wm_pred_norm * target_norm).sum(dim=-1)).mean()
+                
+                l_wm = l_wm_mse + 0.5 * l_wm_cos
+                
+                # 3. 其他正则
                 l_decouple = decouple_fn(out['task_slots'], out['background_context'], out['task_confidence'])
                 l_time = temporal_fn(out['temporal_head_output'])
                 
-                # 总 Loss
                 loss = loss_weights['distill'] * l_distill + \
                        loss_weights['wm'] * l_wm + \
                        loss_weights['decouple'] * l_decouple + \
@@ -506,15 +506,15 @@ def train_stage_b(args):
                 
                 if global_step % 10 == 0:
                     real_loss = loss.item() * args.gradient_accumulation_steps
-                    print(f"Step {global_step} | L: {real_loss:.4f} | WM: {l_wm.item():.4f} | Distill: {l_distill.item():.4f}")
+                    print(f"Step {global_step} | L: {real_loss:.4f} | WM: {l_wm.item():.4f} (MSE:{l_wm_mse:.4f} Cos:{l_wm_cos:.4f})")
 
                     if args.use_wandb and HAS_WANDB:
                         wandb.log({
                             "total_loss": real_loss,
-                            "wm_loss": l_wm.item(),        # 🟢 Log WM Loss
+                            "wm_loss": l_wm.item(),
+                            "wm_mse": l_wm_mse.item(),
+                            "wm_cos": l_wm_cos.item(),
                             "distill_loss": l_distill.item(),
-                            "decouple_loss": l_decouple.item(),
-                            "temporal_loss": l_time.item(),
                             "global_step": global_step,
                             "epoch": epoch,
                             "lr": optimizer.param_groups[0]['lr']

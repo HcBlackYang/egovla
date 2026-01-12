@@ -118,11 +118,22 @@ class RobotPolicySystem:
 
                 t0 = time.time()
                 
-                # 1. 获取图像序列
-                wrist_images = self.recorder.get_sequence_input()
-                if wrist_images is None:
+                # # 1. 获取图像序列
+                # wrist_images = self.recorder.get_sequence_input()
+                # if wrist_images is None:
+                #     time.sleep(0.01)
+                #     continue
+                # 🟢 [修改 1]：只获取最新的一帧，而不是整个序列
+                # 因为 Agent 内部已经维护了长达 500 的 Buffer，不需要我们每次重复发历史
+                with self.recorder.lock:
+                    latest_img = self.recorder.latest_frame
+                
+                if latest_img is None:
                     time.sleep(0.01)
                     continue
+                
+                # 包装成 List 发送，因为 Agent.step 接口期望的是 List[np.array]
+                wrist_images = [latest_img]
 
                 # 2. 获取机器人状态
                 joint_angles = self.robot_env.get_position(action_space=ActionSpace.JOINT_ANGLES)
