@@ -228,6 +228,7 @@ from torch.amp import autocast
 from peft import LoraConfig, get_peft_model
 from transformers import T5Tokenizer
 import torch._dynamo
+from torchvision import transforms
 
 # === 导入你的模型 ===
 from model.fusion_encoder import FusionEncoder
@@ -264,7 +265,7 @@ class RealTimeAgent:
         self.pred_horizon = 64
 
         # === 🟢 ForeSight 核心参数 ===
-        self.history_len = 32       # Buffer 长度：覆盖过去 2-3 秒
+        self.history_len = 500       # Buffer 长度：覆盖过去 2-3 秒
         self.model_input_frames = 6 # 模型实际输入：均匀采样 6 帧
         # ===========================
 
@@ -295,7 +296,10 @@ class RealTimeAgent:
             self.action_std = std_raw
             
         self.action_std = np.maximum(self.action_std, 1e-2)
-        
+
+        # 🟢 [新增] 归一化 (与训练完全一致)
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                              std=[0.229, 0.224, 0.225])
         self._init_models()
         self._init_scheduler()
         
@@ -306,6 +310,8 @@ class RealTimeAgent:
         self.first_frame_tensor = None
         self.text_tokens = None 
         self.default_prompt = "pick up the orange ball and put it on the plank"
+
+        self.warmup()
 
     def _init_models(self):
         print(f"[Agent] Initializing models on {self.device}...")
@@ -332,6 +338,45 @@ class RealTimeAgent:
         self.inference_steps = 25
         self.scheduler.set_timesteps(self.inference_steps)
 
+
+    # 🟢 [新增] 预热函数
+    def warmup(self):
+        print("🔥 [System] Warming up model (compilation)... This may take 1 min.")
+        # 构造假的输入 (Batch=1, View=2, Channel=3, Time=6, H=224, W=224)
+        dummy_video = torch.randn(1, 2, 3, 6, 224, 224, device=self.device, dtype=torch.bfloat16)
+        dummy_text = torch.randint(0, 1000, (1, 16), device=self.device)
+        dummy_state = torch.randn(1, 1, 8, device=self.device, dtype=torch.float32)
+        dummy_ff = torch.randn(1, 2, 3, 224, 224, device=self.device, dtype=torch.float32)
+        
+        try:
+            with autocast('cuda', dtype=torch.bfloat16):
+                # 跑一次 Encoder
+                feats = self.encoder(dummy_video, dummy_text, dummy_state, dummy_ff)
+                feats["state"] = dummy_state[:, -1, :]
+                # 跑一次 Policy
+                latents = torch.randn(1, self.pred_horizon, 8, device=self.device)
+                t = torch.tensor([0], device=self.device)
+                _ = self.policy(latents, t, feats)
+            print("✅ Warmup done. Ready to serve.")
+        except Exception as e:
+            print(f"❌ Warmup failed: {e}")
+
+    # 🟢 [新增] 图像预处理 (暴力 Resize + 归一化)
+    def preprocess_image(self, img_np):
+        # 1. 暴力 Resize: 1280x720 -> 224x224
+        # 这会产生畸变，但保留了所有边缘信息，且与你的训练数据预处理(preprocess_with_teachers.py)一致
+        resized = cv2.resize(img_np, (224, 224))
+        
+        # 2. BGR -> RGB
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        
+        # 3. To Tensor & Normalize
+        tensor = torch.tensor(rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
+        tensor = self.normalize(tensor) # <--- 关键！
+        
+        return tensor
+
+
     def reset_session(self, first_frame_img, current_qpos=None):
         print("[Agent] Resetting session (Cold Start)...")
         self.video_buffer.clear()
@@ -347,11 +392,16 @@ class RealTimeAgent:
         tokens = self.tokenizer(self.default_prompt, return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids
         self.text_tokens = tokens.to(self.device)
         
-        # 填满 buffer (冷启动填充)
-        # 注意：这里我们填满 history_len，这样初始采样就是全是首帧
-        video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0) 
-        for _ in range(self.history_len):
-            self.video_buffer.append(video_frame_unit) 
+        # # 填满 buffer (冷启动填充)
+        # # 注意：这里我们填满 history_len，这样初始采样就是全是首帧
+        # video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0) 
+        # for _ in range(self.history_len):
+        #     self.video_buffer.append(video_frame_unit) 
+
+        # 🟢 [修改] 动态 Buffer 策略
+        # 只存入当前这 1 帧。绝不填充 500 次！
+        video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0)
+        self.video_buffer.append(video_frame_unit)
             
         if current_qpos is None: current_qpos = np.zeros(8)
         else: 
@@ -359,54 +409,86 @@ class RealTimeAgent:
             current_qpos = np.array(current_qpos, dtype=np.float32)
         norm_qpos = (current_qpos - self.action_mean) / self.action_std
         
-        for _ in range(self.history_len):
-            self.state_buffer.append(norm_qpos)
+        # for _ in range(self.history_len):
+        #     self.state_buffer.append(norm_qpos)
+        self.state_buffer.append(norm_qpos)
+
+    # @torch.no_grad()
+    # def step(self, frames_list, current_qpos):
+    #     """
+    #     :param frames_list: 包含若干帧真实历史图像的列表 (通常是客户端发来的最新几帧)
+    #     """
+    #     # 1. 更新 Video Buffer
+    #     # 注意：客户端可能发来 16 帧，也可能只发来最新 1 帧。
+    #     # 我们将它们全部 append 到长 Buffer 中。
+    #     for frame in frames_list:
+    #         frame_resized = cv2.resize(frame, (224, 224))
+    #         frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+    #         wrist_tensor = torch.tensor(frame_rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
+            
+    #         main_fake = torch.zeros_like(wrist_tensor)
+    #         combined_frame = torch.stack([main_fake, wrist_tensor], dim=0)
+    #         self.video_buffer.append(combined_frame)
+        
+    #     # 2. State Preprocess & Update
+    #     if len(current_qpos) == 7:
+    #         current_qpos = list(current_qpos) + [0.0]
+        
+    #     qpos_np = np.array(current_qpos, dtype=np.float32)
+    #     norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
+        
+    #     # 更新状态 Buffer (只存最新的即可，或者存历史)
+    #     # 这里简单起见，append 最新的
+    #     self.state_buffer.append(norm_qpos_np)
+        
+    #     # =========================================================
+    #     # 🟢 核心：均匀采样 (Uniform Sampling)
+    #     # =========================================================
+    #     curr_len = len(self.video_buffer)
+    #     # 从 Buffer 中均匀选取 model_input_frames (6) 帧
+    #     # np.linspace 生成均匀间隔的索引
+    #     indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
+        
+    #     # 取出选中的帧
+    #     buffer_list = list(self.video_buffer)
+    #     selected_frames = [buffer_list[i] for i in indices]
+        
+    #     # 堆叠 -> [6, 2, 3, 224, 224]
+    #     vid_t = torch.stack(selected_frames).to(self.device)
+    #     # 调整维度 -> [1, 2, 3, 6, 224, 224] (Batch=1, T=6)
+    #     vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0)
+        
 
     @torch.no_grad()
     def step(self, frames_list, current_qpos):
-        """
-        :param frames_list: 包含若干帧真实历史图像的列表 (通常是客户端发来的最新几帧)
-        """
         # 1. 更新 Video Buffer
-        # 注意：客户端可能发来 16 帧，也可能只发来最新 1 帧。
-        # 我们将它们全部 append 到长 Buffer 中。
         for frame in frames_list:
-            frame_resized = cv2.resize(frame, (224, 224))
-            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-            wrist_tensor = torch.tensor(frame_rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
-            
+            wrist_tensor = self.preprocess_image(frame)
             main_fake = torch.zeros_like(wrist_tensor)
             combined_frame = torch.stack([main_fake, wrist_tensor], dim=0)
-            self.video_buffer.append(combined_frame)
+            self.video_buffer.append(combined_frame) 
+            # 队列会自动挤出旧的，保持最新的500帧
         
-        # 2. State Preprocess & Update
-        if len(current_qpos) == 7:
-            current_qpos = list(current_qpos) + [0.0]
-        
+        # 2. 更新 State
+        if len(current_qpos) == 7: current_qpos = list(current_qpos) + [0.0]
         qpos_np = np.array(current_qpos, dtype=np.float32)
         norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
-        
-        # 更新状态 Buffer (只存最新的即可，或者存历史)
-        # 这里简单起见，append 最新的
         self.state_buffer.append(norm_qpos_np)
         
-        # =========================================================
-        # 🟢 核心：均匀采样 (Uniform Sampling)
-        # =========================================================
+        # 🟢 [修改] 动态均匀采样 (核心逻辑)
         curr_len = len(self.video_buffer)
-        # 从 Buffer 中均匀选取 model_input_frames (6) 帧
-        # np.linspace 生成均匀间隔的索引
+        
+        # 无论当前 Buffer 是 1 帧还是 500 帧，都均匀取出 6 帧
+        # 这保证了模型始终能看到“全历史”的概貌，而不是“局部静止切片”
         indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
         
-        # 取出选中的帧
-        buffer_list = list(self.video_buffer)
-        selected_frames = [buffer_list[i] for i in indices]
+        selected_frames = [self.video_buffer[i] for i in indices]
         
-        # 堆叠 -> [6, 2, 3, 224, 224]
+        # Stack -> [6, 2, 3, 224, 224]
         vid_t = torch.stack(selected_frames).to(self.device)
-        # 调整维度 -> [1, 2, 3, 6, 224, 224] (Batch=1, T=6)
+        # Permute -> [1, 2, 3, 6, 224, 224] (Batch, View, Channel, Time, H, W)
         vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0)
-        
+
         # State: 取当前最新的状态即可 (因为 FusionEncoder 只用 state[:, -1, :])
         # 为了格式统一，我们构造一个 [1, 1, 8] 的 Tensor
         state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)

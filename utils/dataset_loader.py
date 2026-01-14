@@ -190,6 +190,7 @@ import numpy as np
 import os
 import json
 from transformers import T5Tokenizer
+from torchvision import transforms
 
 class RobotDataset(Dataset):
     def __init__(self, hdf5_path, 
@@ -206,7 +207,10 @@ class RobotDataset(Dataset):
         
         # 🟢 定义稀疏预测步长 (World Model Anchors)
         self.future_offsets = [0, 2, 4, 8, 16, 32]
-        
+
+        # === [新增] 定义归一化 (VideoMAE 标准) ===
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                              std=[0.229, 0.224, 0.225])
         # === 1. 加载 Tokenizer ===
         print(f"[Dataset] Loading Tokenizer from {tokenizer_path}...")
         try:
@@ -335,12 +339,26 @@ class RobotDataset(Dataset):
             main_frames = unique_main_frames[inverse_indices]
             wrist_frames = unique_wrist_frames[inverse_indices]
             
-            # 转 Tensor [6, 3, H, W]
-            main_seq = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0
-            wrist_seq = torch.tensor(wrist_frames).float().permute(0, 3, 1, 2) / 255.0
+            # # 转 Tensor [6, 3, H, W]
+            # main_seq = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0
+            # wrist_seq = torch.tensor(wrist_frames).float().permute(0, 3, 1, 2) / 255.0
             
-            # Stack Views: [2, 3, 6, H, W]
-            video = torch.stack([main_seq, wrist_seq], dim=0).permute(0, 1, 2, 3, 4) # 这里的 dim 顺序按你模型要求来
+            # # Stack Views: [2, 3, 6, H, W]
+            # video = torch.stack([main_seq, wrist_seq], dim=0).permute(0, 1, 2, 3, 4) # 这里的 dim 顺序按你模型要求来
+
+            # 修改后 (先 /255.0，再归一化):
+            main_t_raw = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0
+            wrist_t_raw = torch.tensor(wrist_frames).float().permute(0, 3, 1, 2) / 255.0
+            
+            # 应用归一化 (注意维度匹配，Normalize作用于C维度)
+            # main_t_raw shape: [6, 3, H, W]
+            main_seq = self.normalize(main_t_raw)
+            wrist_seq = self.normalize(wrist_t_raw)
+            
+            # Stack Views: [2, 3, 6, H, W] (根据你的模型要求调整)
+            video = torch.stack([main_seq, wrist_seq], dim=0).transpose(1, 2)
+
+
             # 注意：之前是 [2, 3, T, H, W] 还是 [B, 2, C, T, H, W]?
             # 你的旧代码是: torch.stack([main_tensor, wrist_tensor], dim=0).permute(0, 2, 1, 3, 4)
             # 即 [2, T, 3, H, W] -> [2, 3, T, H, W]
@@ -393,6 +411,22 @@ class RobotDataset(Dataset):
             teacher_exo_legacy = torch.zeros(self.window_size, 1152)
 
         text_tokens = self.tokenizer(meta['instruction'], return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids.squeeze(0)
+
+        if anchor_key in self.anchor_bank:
+            first_frame = self.anchor_bank[anchor_key] 
+            # 注意：如果是从 bank 里取出的，确保 bank 存的时候也归一化了，或者在这里归一化
+            # 如果 bank 里存的是 raw tensor，这里要加:
+            # first_frame = self.normalize(first_frame) 
+        else:
+            # 如果是现场读取
+            m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
+            w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
+            
+            # 也要归一化
+            m0 = self.normalize(m0)
+            w0 = self.normalize(w0)
+            first_frame = torch.stack([m0, w0], dim=0)
+
 
         return {
             "video": video,                 # [2, 3, 6, H, W] (Uniform Sampled)
