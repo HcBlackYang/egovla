@@ -305,7 +305,7 @@ class RDTWrapper(nn.Module):
             "depth": int(rdt_cfg.get("depth", 28)),
             "num_heads": int(rdt_cfg.get("num_heads", 16)),
             "max_lang_cond_len": int(raw_cfg.get("max_lang_cond_len", 1024)),
-            "img_cond_len": int(raw_cfg.get("img_cond_len", 4096)),
+            "img_cond_len": int(raw_cfg.get("img_cond_len", 4096)), # 原始长度
             "lang_pos_embed_config": raw_cfg.get("lang_pos_embed_config", None),
             "img_pos_embed_config": raw_cfg.get("img_pos_embed_config", None),
             "dtype": torch.float32 
@@ -328,10 +328,18 @@ class RDTWrapper(nn.Module):
         # 5. 加载权重
         self._load_weights_correctly(model_path)
 
-        # 🟢 [修改]：彻底移除 img_pos_embed 的截断逻辑！
-        # 让它保持 config 中的长度 (4096)，以便容纳我们的 70 个 token。
+        # 🟢 [核心修复]：主动裁剪 Pos Embed 到 70
+        # 你的输入固定是 70 (64 Spatial + 6 Future)
+        # 必须把 4374 裁剪成 70，否则 inner model 做加法时会报错
+        EXPECTED_TOKEN_LEN = 70 
+        
         if hasattr(self.rdt_model, 'img_cond_pos_embed'):
-             logger.info(f"✅ Image Pos Embed Shape: {self.rdt_model.img_cond_pos_embed.shape} (Should be large enough for 70)")
+            pe = self.rdt_model.img_cond_pos_embed
+            if pe.shape[1] > EXPECTED_TOKEN_LEN:
+                logger.info(f"✂️ Cutting Pos Embed: {pe.shape[1]} -> {EXPECTED_TOKEN_LEN} to match ForeSight input.")
+                # 创建一个新的 Parameter，替换掉原来的
+                new_pe = pe.data[:, :EXPECTED_TOKEN_LEN, :].clone()
+                self.rdt_model.img_cond_pos_embed = nn.Parameter(new_pe)
 
     def _load_weights_correctly(self, model_path):
         weights_path = os.path.join(model_path, "pytorch_model.bin")
@@ -356,10 +364,8 @@ class RDTWrapper(nn.Module):
             if k.startswith("model."): k_clean = k[6:] 
             elif k.startswith("module."): k_clean = k[7:]
             
-            # 🟢 [修改]：移除加载时的截断逻辑
-            # if "img_cond_pos_embed" in k_clean and v.shape[1] > 2:
-            #     v = v[:, :2, :] 
-
+            # 加载时不截断，加载完后再在 __init__ 里统一截断
+            
             if k_clean in current_keys:
                 target_shape = self.rdt_model.state_dict()[k_clean].shape
                 if v.shape == target_shape:
@@ -367,8 +373,6 @@ class RDTWrapper(nn.Module):
             
         missing, unexpected = self.rdt_model.load_state_dict(new_dict, strict=False)
         logger.info(f"Weights loaded. Missing keys: {len(missing)}")
-        if "x_pos_embed" not in new_dict:
-            logger.warning("⚠️ Critical: x_pos_embed was NOT loaded!")
 
     def forward(self, noisy_action, timestep, conditions):
         B = noisy_action.shape[0]
@@ -395,13 +399,7 @@ class RDTWrapper(nn.Module):
         lang_c = torch.zeros((B, 1, 2048), device=device, dtype=dtype)
         lang_mask = torch.zeros((B, 1), device=device, dtype=torch.bool)
         
-        # 动态截取 Pos Embed (如果 Pretrained 是 4096，我们这里只需要前 70)
-        # RDT 内部会自动 handle，或者我们可以这里截断 img_c，但 img_c 已经是 70 了
-        # 只要 ensure img_cond_pos_embed 够长就行
-        target_img_len = self.rdt_model.img_cond_pos_embed.shape[1]
-        if img_c.shape[1] > target_img_len:
-            img_c = img_c[:, :target_img_len, :]
-        
+        # 此时 img_cond_pos_embed 已经是 70 了，不需要再截取 img_c
         img_mask = torch.zeros((B, img_c.shape[1]), device=device, dtype=torch.bool)
         freq = torch.full((B,), 30, device=device, dtype=torch.long)
 
@@ -412,18 +410,18 @@ class RDTWrapper(nn.Module):
             lang_mask=lang_mask, img_mask=img_mask
         )
         
-        return pred[:, 1:, :] # Slice off state token
-    
+        return pred[:, 1:, :] 
+
     def save_pretrained(self, save_directory):
         self.rdt_model.save_pretrained(save_directory)
         torch.save(self.visual_proj.state_dict(), os.path.join(save_directory, "visual_proj.bin"))
         torch.save(self.action_proj.state_dict(), os.path.join(save_directory, "action_proj.bin"))
         torch.save(self.state_proj.state_dict(), os.path.join(save_directory, "state_proj.bin"))
 
-    def load_pretrained_projections(self, save_directory):
-        p_vis = os.path.join(save_directory, "visual_proj.bin")
-        p_act = os.path.join(save_directory, "action_proj.bin")
-        p_sta = os.path.join(save_directory, "state_proj.bin")
-        if os.path.exists(p_vis): self.visual_proj.load_state_dict(torch.load(p_vis))
-        if os.path.exists(p_act): self.action_proj.load_state_dict(torch.load(p_act))
-        if os.path.exists(p_sta): self.state_proj.load_state_dict(torch.load(p_sta))
+    # def load_pretrained_projections(self, save_directory):
+    #     p_vis = os.path.join(save_directory, "visual_proj.bin")
+    #     p_act = os.path.join(save_directory, "action_proj.bin")
+    #     p_sta = os.path.join(save_directory, "state_proj.bin")
+    #     if os.path.exists(p_vis): self.visual_proj.load_state_dict(torch.load(p_vis))
+    #     if os.path.exists(p_act): self.action_proj.load_state_dict(torch.load(p_act))
+    #     if os.path.exists(p_sta): self.state_proj.load_state_dict(torch.load(p_sta))

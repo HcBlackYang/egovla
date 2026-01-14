@@ -551,7 +551,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_train_steps', type=int, default=10000)
     parser.add_argument('--checkpointing_steps', type=int, default=500)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
-    parser.add_argument('--resume_from_checkpoint', type=str, default=None)
+    parser.add_argument('--resume_from_checkpoint', type=str, default='/yanghaochuan/checkpoints/StageB_ForeSight_step_1500.pt')
     parser.add_argument('--use_wandb', action='store_true', default=False)
     
     args = parser.parse_args()

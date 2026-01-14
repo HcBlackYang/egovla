@@ -237,10 +237,10 @@ from model.rdt_model import RDTWrapper
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 # 使用新的 16dataset_stats (对应新的采样策略)
-STATS_PATH = "/yanghaochuan/data/16dataset_stats.json"
+STATS_PATH = "/yanghaochuan/data/111dataset_stats.json"
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
 # 使用 ForeSight 训练出的 Checkpoint
-STAGE_C_PATH = '/yanghaochuan/16checkpoints_finetune/12stageC_step_3800.pt'
+STAGE_C_PATH = '/yanghaochuan/111checkpoints_finetune/StageC_ForeSight_step_4000.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -264,7 +264,7 @@ class RealTimeAgent:
         self.pred_horizon = 64
 
         # === 🟢 ForeSight 核心参数 ===
-        self.history_len = 500       # Buffer 长度：覆盖过去 2-3 秒
+        self.history_len = 32       # Buffer 长度：覆盖过去 2-3 秒
         self.model_input_frames = 6 # 模型实际输入：均匀采样 6 帧
         # ===========================
 
@@ -305,7 +305,7 @@ class RealTimeAgent:
         
         self.first_frame_tensor = None
         self.text_tokens = None 
-        self.default_prompt = "pick up the orange ball"
+        self.default_prompt = "pick up the orange ball and put it on the plank"
 
     def _init_models(self):
         print(f"[Agent] Initializing models on {self.device}...")

@@ -405,7 +405,7 @@ from losses.distillation_loss import DistillationLoss
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 # 🟢 请确保这里指向正确的统计文件
-STATS_PATH = '/yanghaochuan/data/1223dataset_stats.json' 
+STATS_PATH = '/yanghaochuan/data/111dataset_stats.json' 
 
 def train_stage_c(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -547,16 +547,34 @@ def train_stage_c(args):
             teacher_feats = {"siglip_features": siglip_target, "exo_features": exo_target}
 
             # Modality Dropout (随机 Mask 模拟推理时的不确定性)
+            # rand_val = torch.rand(1).item()
+            # video_input = video.clone()
+            # ff_input = ff.clone()
+            
+            # if rand_val < 0.7: 
+            #     video_input[:, 0] = 0.0 # Mask Main Camera
+            #     ff_input[:, 0] = 0.0
+            # elif rand_val < 0.8: 
+            #     video_input[:, 1] = 0.0 # Mask Wrist Camera
+            #     ff_input[:, 1] = 0.0
             rand_val = torch.rand(1).item()
+            mask_type = "Wrist_Only" # 默认状态
+            
             video_input = video.clone()
             ff_input = ff.clone()
             
-            if rand_val < 0.7: 
-                video_input[:, 0] = 0.0 # Mask Main Camera
+            # 策略：90% 的时间完全 Mask 掉 Main View
+            # 理由：推理时你只有 Wrist。如果训练时让它看到 Main，它就会依赖 Main。
+            # 必须把它逼到“只能靠 Wrist + Latent”来决策的绝境。
+            if rand_val < 0.90:
+                video_input[:, 0] = 0.0
                 ff_input[:, 0] = 0.0
-            elif rand_val < 0.8: 
-                video_input[:, 1] = 0.0 # Mask Wrist Camera
-                ff_input[:, 1] = 0.0
+                mask_type = "Simulate_Inference"
+            
+            # 剩下 10%：Teacher Guidance (全可见)
+            # 仅用于维持 Encoder 的特征稳定性，不让它彻底遗忘 Stage B 学到的全图特征。
+            else:
+                mask_type = "Teacher_Guidance"
             
             with autocast('cuda', dtype=torch.bfloat16):
                 # 1. Encoder Forward
@@ -658,10 +676,10 @@ def train_stage_c(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
-    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/12pick_up_the_orange_ball.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/16checkpoints_finetune')
+    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/112checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default=None)
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/StageB_ForeSight_step_2500.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)
