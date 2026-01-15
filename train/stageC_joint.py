@@ -481,6 +481,21 @@ def train_stage_c(args):
     )
     rdt_wrapper.rdt_model = get_peft_model(rdt_wrapper.rdt_model, peft_config)
     
+    # 🟢 编译 Encoder (Backbone 冻结了，编译效果很好)
+    print("🚀 Compiling FusionEncoder...")
+    try:
+        fusion_encoder = torch.compile(fusion_encoder)
+    except Exception as e:
+        print(f"⚠️ Encoder compilation failed: {e}")
+
+    # # 🟢 编译 RDT (LoRA 部分可能需要一点时间编译)
+    # print("🚀 Compiling RDT...")
+    # try:
+    #     rdt_wrapper.rdt_model = torch.compile(rdt_wrapper.rdt_model)
+    # except Exception as e:
+    #     print(f"⚠️ RDT compilation failed: {e}")
+
+
     # 优化器配置：RDT 学习率稍高，Encoder 学习率极低 (微调)
     params = [
         {'params': filter(lambda p: p.requires_grad, rdt_wrapper.parameters()), 'lr': 1e-4},
@@ -575,7 +590,11 @@ def train_stage_c(args):
             # 仅用于维持 Encoder 的特征稳定性，不让它彻底遗忘 Stage B 学到的全图特征。
             else:
                 mask_type = "Teacher_Guidance"
-            
+
+
+            CONSISTENCY_FREQ = 5
+
+
             with autocast('cuda', dtype=torch.bfloat16):
                 # 1. Encoder Forward
                 # 这里的 out 包含 'e_t' (70 tokens) 和 'wm_latents' (6 latents)
@@ -597,6 +616,11 @@ def train_stage_c(args):
                 
                 # Loss 1: Action Diffusion Loss
                 loss_diff = F.mse_loss(pred_noise, noise)
+                # 🟢 [修改] 稀疏计算 Consistency Loss
+                if global_step % CONSISTENCY_FREQ == 0:
+                    loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
+                else:
+                    loss_cons = torch.tensor(0.0, device=device, requires_grad=True)
                 
                 # Loss 2: 🟢 [ForeSight] World Model Loss (MSE + Cosine)
                 # 必须与 Stage B 保持一致，防止微调时破坏 Latent 结构
@@ -677,9 +701,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/112checkpoints_finetune')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/114checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/StageB_ForeSight_step_2500.pt')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/114StageB_ForeSight_step_3000.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)

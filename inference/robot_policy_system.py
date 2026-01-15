@@ -1,3 +1,5 @@
+
+ego项目
 import sys
 import os
 import time
@@ -202,8 +204,8 @@ class RobotPolicySystem:
                                 self.gripper_status["current_state"] = 1
                         # =========================================================
                         
-                        # 控频 (40Hz)
-                        remain = 0.025 - (time.time() - t_step_start)
+                        # 控频 (30Hz)
+                        remain = 0.0333 - (time.time() - t_step_start)
                         if remain > 0: time.sleep(remain)
 
                 latency = (time.time() - t0) * 1000
@@ -229,6 +231,8 @@ if __name__ == "__main__":
     system = RobotPolicySystem(ip="127.0.0.1", port=6000)
     system.run(task_name="pick up the orange ball and put it on the plank")
 
+
+# rdt 单视角项目
 # import sys
 # import os
 # import time
@@ -436,3 +440,228 @@ if __name__ == "__main__":
     
 #     # [修改点] 确保这里的指令与你训练时的一致
 #     system.run(task_name="pick up the orange ball")
+
+
+# # rdt 双视角项目
+# import sys
+# import os
+# import time
+# import logging
+# import cv2
+# import numpy as np
+# import math
+# import threading
+# from collections import deque
+# from common.constants import ActionSpace
+# from robots.franky_env import FrankyEnv
+# from robots.robot_param import RobotParam
+# from systems.tcp_client import TCPClientPolicy 
+# from cameras.realsense_env import RealSenseEnv
+
+# # 配置日志
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# class ImageRecorder(threading.Thread):
+#     def __init__(self, camera, name="Camera", buffer_size=16):
+#         super().__init__()
+#         self.camera = camera
+#         self.name_tag = name
+#         self.buffer_size = buffer_size
+#         self.running = False
+#         self.lock = threading.Lock()
+        
+#         self.latest_frame = None
+#         self.frame_buffer = deque(maxlen=buffer_size) 
+#         self.stop_event = threading.Event()
+
+#     def run(self):
+#         self.running = True
+#         self.camera.start_monitoring()
+#         logging.info(f"[{self.name_tag}] Background thread started.")
+        
+#         while not self.stop_event.is_set():
+#             # 获取数据
+#             data = self.camera.get_latest_frame()
+#             if data is not None:
+#                 img = data['bgr']
+#                 with self.lock:
+#                     self.latest_frame = img.copy()
+#                     self.frame_buffer.append(img)
+                
+#                 # ❌ 删除这里的 imshow，它不能在子线程运行
+#                 # cv2.imshow(...) 
+            
+#             # 保持 30Hz 采样
+#             time.sleep(1.0 / 30.0) 
+        
+#         logging.info(f"[{self.name_tag}] Stopped.")
+
+#     def stop(self):
+#         self.stop_event.set()
+#         self.join()
+
+# class RobotPolicySystem:
+#     def __init__(self, action_space: ActionSpace = ActionSpace.JOINT_ANGLES, ip: str = "127.0.0.1", port: int = 6000):
+#         self.action_space = action_space
+        
+#         # 1. 初始化机器人
+#         self.robot_env = FrankyEnv(
+#             action_space=action_space, 
+#             inference_mode=True, 
+#             robot_param=RobotParam(np.array([ 0.0, 0.0, -math.pi / 2]), np.array([ 0.53433071, 0.52905707, 0.00440881]))
+#         )
+        
+#         logging.info(f"Connecting to {ip}:{port}...")
+#         self.client = TCPClientPolicy(host=ip, port=port)
+#         logging.info("Connected.")
+        
+#         # 2. 初始化双相机
+#         # ⚠️ 请确保这里填入了正确的序列号
+#         logging.info("Initializing Cameras...")
+#         self.wrist_camera = RealSenseEnv(
+#             camera_name="wrist_image", 
+#             serial_number="YOUR_WRIST_SERIAL_NUMBER", 
+#             width=640, height=480
+#         )
+#         self.wrist_recorder = ImageRecorder(self.wrist_camera, name="Wrist", buffer_size=16)
+
+#         self.head_camera = RealSenseEnv(
+#             camera_name="head_image", 
+#             serial_number="YOUR_HEAD_SERIAL_NUMBER", 
+#             width=640, height=480
+#         )
+#         self.head_recorder = ImageRecorder(self.head_camera, name="Head", buffer_size=16)
+
+#         self.gripper_status = {"current_state": 0}
+#         self.stop_evaluation = threading.Event()
+
+#     def run(self, task_name: str = "default_task"):
+#         # 启动录制线程
+#         self.wrist_recorder.start()
+#         self.head_recorder.start()
+        
+#         logging.info("Waiting 2.0s for warmup...")
+#         time.sleep(2.0)
+        
+#         EXECUTION_HORIZON = 15  
+#         MAX_STEP_RAD = 0.08     
+#         GRIPPER_THRESHOLD = 0.06 
+#         last_executed_joints = None
+        
+#         logging.info(f"Starting inference loop... (Gripper Threshold: {GRIPPER_THRESHOLD})")
+
+#         try:
+#             while not self.stop_evaluation.is_set():
+#                 if not self.wrist_recorder.is_alive() or not self.head_recorder.is_alive(): 
+#                     logging.error("Camera thread died!")
+#                     break
+
+#                 t0 = time.time()
+                
+#                 # 1. 获取图像
+#                 with self.wrist_recorder.lock:
+#                     wrist_img = self.wrist_recorder.latest_frame
+#                 with self.head_recorder.lock:
+#                     head_img = self.head_recorder.latest_frame
+                
+#                 # 2. ✅ [核心修复] 在主线程进行显示
+#                 # 只有在主线程调用 imshow 才能正常刷新窗口
+#                 display_ok = True
+#                 if wrist_img is not None:
+#                     cv2.imshow("Wrist View", wrist_img)
+#                 else:
+#                     display_ok = False
+                    
+#                 if head_img is not None:
+#                     cv2.imshow("Head View", head_img)
+#                 else:
+#                     display_ok = False
+                
+#                 # 必须有 waitKey 才能刷新 GUI
+#                 if cv2.waitKey(1) & 0xFF == ord('q'):
+#                     break
+                
+#                 # 如果任意一个相机还没图，就先跳过推理，等待相机准备好
+#                 if not display_ok:
+#                     time.sleep(0.01)
+#                     continue
+
+#                 # 3. 获取状态
+#                 joint_angles = self.robot_env.get_position(action_space=ActionSpace.JOINT_ANGLES)
+#                 gripper_width = self.robot_env.get_gripper_width()
+#                 eef_pose = self.robot_env.get_position(action_space=ActionSpace.EEF_POSE)
+                
+#                 qpos_8d = list(joint_angles) + [float(gripper_width)]
+#                 state = np.concatenate([eef_pose, [gripper_width]])
+                
+#                 # 4. 构造请求
+#                 element = {
+#                     "observation/head_image": [head_img],   
+#                     "observation/wrist_image": [wrist_img], 
+#                     "observation/state": state,
+#                     "qpos": qpos_8d, 
+#                     "prompt": task_name,
+#                 }
+
+#                 # 5. 推理
+#                 inference_results = self.client.infer(element)
+                
+#                 if inference_results and "actions" in inference_results:
+#                     new_actions = inference_results["actions"][0]
+#                     if not isinstance(new_actions, list) or len(new_actions) == 0: continue
+
+#                     actions_to_execute = new_actions[:EXECUTION_HORIZON]
+
+#                     for action in actions_to_execute:
+#                         if not isinstance(action, (list, tuple, np.ndarray)): continue
+                        
+#                         action_np = np.array(action, dtype=np.float64)
+#                         target_joints = action_np[:-1]
+#                         gripper_val = action_np[-1]
+
+#                         if last_executed_joints is not None:
+#                             diff = np.clip(target_joints - last_executed_joints, -MAX_STEP_RAD, MAX_STEP_RAD)
+#                             target_joints = last_executed_joints + diff
+#                         last_executed_joints = target_joints.copy()
+
+#                         t_step_start = time.time()
+#                         self.robot_env.step(target_joints, asynchronous=True)
+                        
+#                         if gripper_val > GRIPPER_THRESHOLD:
+#                             if self.gripper_status["current_state"] != -1:
+#                                 self.robot_env.open_gripper(asynchronous=True)
+#                                 self.gripper_status["current_state"] = -1
+#                         elif gripper_val < GRIPPER_THRESHOLD:
+#                             if self.gripper_status["current_state"] != 1:
+#                                 self.robot_env.close_gripper(asynchronous=True)
+#                                 self.gripper_status["current_state"] = 1
+                        
+#                         # 30Hz 控频
+#                         time_step = 1.0 / 30.0 
+#                         remain = time_step - (time.time() - t_step_start)
+#                         if remain > 0: time.sleep(remain)
+
+#                 latency = (time.time() - t0) * 1000
+#                 print(f"\rLatency: {latency:.1f}ms | Gripper: {gripper_val:.4f}", end="")
+
+#         except KeyboardInterrupt:
+#             logging.info("Keyboard Interrupt received.")
+#         except Exception as e:
+#             logging.error(f"Runtime Error: {e}")
+#             import traceback
+#             traceback.print_exc()
+#         finally:
+#             self.stop()
+#             cv2.destroyAllWindows() # 退出时关闭窗口
+
+#     def stop(self):
+#         self.stop_evaluation.set()
+#         if self.wrist_recorder.is_alive(): self.wrist_recorder.stop()
+#         if self.head_recorder.is_alive(): self.head_recorder.stop()
+#         time.sleep(0.5)
+#         logging.info("System stopped.")
+
+# if __name__ == "__main__":
+#     # 请确保修改 IP 和上面的相机 Serial Number
+#     system = RobotPolicySystem(ip="127.0.0.1", port=6000)
+#     system.run(task_name="pick up the orange ball and put it on the plank")

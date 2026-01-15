@@ -36,11 +36,11 @@ echo "Starting training..."
 
 $PYTHON_EXE -u train/stageC_joint.py \
     --data_root /yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5 \
-    --output_dir /yanghaochuan/111checkpoints_finetune \
-    --batch_size 32 \
-    --gradient_accumulation_steps 2 \
-    --max_train_steps 10000 \
-    --checkpointing_steps 200 \
+    --output_dir /yanghaochuan/114checkpoints_finetune \
+    --batch_size 128 \
+    --gradient_accumulation_steps 1 \
+    --max_train_steps 20000 \
+    --checkpointing_steps 500 \
     --pred_horizon 64 \
     --use_wandb
 
