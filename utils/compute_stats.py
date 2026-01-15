@@ -89,6 +89,6 @@ def compute_stats(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, required=True, help="Path to HDF5 file")
-    parser.add_argument('--save_path', type=str, default='/yanghaochuan/data/111dataset_stats.json')
+    parser.add_argument('--save_path', type=str, default='/yanghaochuan/data/115dataset_stats.json')
     args = parser.parse_args()
     compute_stats(args)
