@@ -591,6 +591,13 @@ class RealTimeAgent:
         self.pred_horizon = 64
         self.history_len = 500       
         self.model_input_frames = 6 
+        
+        import time
+        import os
+        # 定义保存目录
+        self.debug_dir = f"debug_visuals_{int(time.time())}"
+        os.makedirs(self.debug_dir, exist_ok=True)
+        self.step_counter = 0
 
         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
         try:
@@ -699,6 +706,44 @@ class RealTimeAgent:
         except Exception as e:
             pass
 
+    # 🟢 [新增] 这是一个专门把 Tensor 还原成图片的函数
+    def save_model_input_visuals(self, vid_tensor, step_idx):
+        """
+        将模型输入的 6 帧 Tensor 反归一化并拼图保存
+        vid_tensor shape: [1, 2, 3, 6, 224, 224] (Batch, View, Channel, Time, H, W)
+        """
+        try:
+            # 取出 wrist 视角 (View Index 1), 去掉 Batch 维 -> [3, 6, 224, 224]
+            # 注意：你的代码里 Main 是 0 (全黑), Wrist 是 1
+            wrist_t = vid_tensor[0, 1] 
+            
+            # 反归一化参数 (ImageNet)
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1, 1).to(wrist_t.device)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1, 1).to(wrist_t.device)
+            
+            # 反归一化: x * std + mean
+            wrist_t = wrist_t * std + mean
+            wrist_t = torch.clamp(wrist_t, 0, 1)
+            
+            # 转为 Numpy: [3, 6, 224, 224] -> [6, 224, 224, 3]
+            imgs = wrist_t.permute(1, 2, 3, 0).detach().cpu().numpy()
+            imgs = (imgs * 255).astype(np.uint8)
+            
+            # 拼接 6 帧成一行长图
+            # imgs[0] 是 Buffer 里最早的一帧，imgs[-1] 是最新的一帧
+            concat_img = np.hstack([imgs[i] for i in range(6)])
+            
+            # 转为 BGR 供 cv2 保存
+            concat_img = cv2.cvtColor(concat_img, cv2.COLOR_RGB2BGR)
+            
+            # 保存
+            save_path = os.path.join(self.debug_dir, f"step_{step_idx:04d}_buffer.jpg")
+            cv2.imwrite(save_path, concat_img)
+            # print(f"📸 Saved buffer visual to {save_path}") # 刷屏可注释掉
+            
+        except Exception as e:
+            print(f"⚠️ Visualization Failed: {e}")
+
     def reset_session(self, first_frame_img, current_qpos=None):
         print("[Agent] Resetting session (Cold Start)...")
         self.video_buffer.clear()
@@ -759,6 +804,12 @@ class RealTimeAgent:
         
         vid_t = torch.stack(selected_frames).to(self.device)
         vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0)
+
+        # =========================================================
+        # 🟢 [插入] 在这里保存模型看到的画面！
+        # =========================================================
+        self.save_model_input_visuals(vid_t, self.step_counter)
+        self.step_counter += 1
 
         # State: 取当前 state
         state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
