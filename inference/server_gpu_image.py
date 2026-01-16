@@ -104,6 +104,7 @@
 # if __name__ == '__main__':
 #     run_image_inference_server()
 
+import numpy as np
 import socket
 import struct
 import json
@@ -196,11 +197,66 @@ def run_image_inference_server(host='0.0.0.0', port=6000):
                 conn.sendall(struct.pack('>I', len(resp_bytes)))
                 conn.sendall(resp_bytes)
                 
+                # try:
+                #     first_val = action[0][0]
+                #     print(f"\r[Infer] Time: {inference_time:.1f}ms | SeqLen: {len(frames_list)} | J0: {first_val:.2f}", end="", flush=True)
+                # except:
+                #     print(f"\r[Infer] Time: {inference_time:.1f}ms", end="", flush=True)
+                
                 try:
-                    first_val = action[0][0]
-                    print(f"\r[Infer] Time: {inference_time:.1f}ms | SeqLen: {len(frames_list)} | J0: {first_val:.2f}", end="", flush=True)
-                except:
-                    print(f"\r[Infer] Time: {inference_time:.1f}ms", end="", flush=True)
+                    
+                    # 1. 转换成 numpy 方便处理形状
+                    # 无论它原本是 list 还是 tensor，先转 numpy
+                    if hasattr(action, 'cpu'):
+                        pred_arr = action.detach().cpu().numpy()
+                    else:
+                        pred_arr = np.array(action)
+                    
+                    # 2. 形状诊断与归一化
+                    # 情况 A: [Batch, Horizon, Dim] -> (1, 64, 8)
+                    if pred_arr.ndim == 3:
+                        pred_traj = pred_arr[0] # 取 Batch 0 -> (64, 8)
+                    # 情况 B: [Horizon, Dim] -> (64, 8)
+                    elif pred_arr.ndim == 2:
+                        pred_traj = pred_arr    # 已经是轨迹了
+                    # 情况 C: [Batch, Dim] -> (1, 8) 或者是单步预测
+                    elif pred_arr.ndim == 1:
+                        # 把它变成 (1, 8) 的二维矩阵，假装它是只有1步的轨迹
+                        pred_traj = pred_arr[np.newaxis, :]
+                    else:
+                        raise ValueError(f"Unknown shape: {pred_arr.shape}")
+
+                    # 3. 截取前 15 步 (如果只有1步，就只会取到1步)
+                    steps_to_show = 15
+                    exec_traj = pred_traj[:steps_to_show]
+                    
+                    print(f"\n{'='*25} RDT Action (First {len(exec_traj)} Steps) {'='*25}")
+                    print(f"[Inference Time] {inference_time:.1f}ms")
+                    print(f"[Raw Shape] {pred_arr.shape} -> Processing as {pred_traj.shape}")
+                    
+                    # 打印表头
+                    header = f"{'Step':<4} | {'J0':^7} {'J1':^7} {'J2':^7} {'J3':^7} {'J4':^7} {'J5':^7} {'J6':^7} | {'Grip':^6}"
+                    print(header)
+                    print("-" * len(header))
+
+                    # 4. 循环打印
+                    for i, step in enumerate(exec_traj):
+                        # 确保 step 也是数组
+                        step = np.array(step).flatten()
+                        
+                        if len(step) >= 8:
+                            joints = step[:7]
+                            gripper = step[7]
+                            joints_str = " ".join([f"{x: .4f}" for x in joints])
+                            print(f"{i:<4} | {joints_str} | {gripper:.4f}")
+                        else:
+                            print(f"{i:<4} | [Error: Dim={len(step)}] {step}")
+
+                    print("="*82 + "\n")
+                    
+                except Exception as e:
+                    print(f"\n[Error Printing] {e}")
+                    print(f"[Raw Data] {action}")
 
         except Exception as e:
             print(f"\n[Error] 连接异常: {e}", flush=True)

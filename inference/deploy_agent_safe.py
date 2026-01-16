@@ -767,7 +767,7 @@ class RealTimeAgent:
             current_qpos = np.array(current_qpos, dtype=np.float32)
             
         # 🔍 打印初始状态
-        print(f"   🚩 [Reset QPos] {current_qpos[:3]} ... Grip: {current_qpos[7]}")
+        print(f"   🚩 [Reset QPos] {current_qpos[:6]} ... Grip: {current_qpos[7]}")
         
         norm_qpos = (current_qpos - self.action_mean) / self.action_std
         self.state_buffer.append(norm_qpos)
@@ -828,6 +828,15 @@ class RealTimeAgent:
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
             
         normalized_actions = latents[0].float()
+        # === 🟢 [新增] 诊断代码 ===
+        # 计算当前预测动作的“平均绝对值”
+        mean_abs_val = torch.mean(torch.abs(normalized_actions)).item()
+        
+        # 打印第一步的归一化数值 (看它是不是全是 0.x)
+        first_step_norm = normalized_actions[0].detach().cpu().numpy()
+        print(f"\n🔍 [Diagnosis] Normalized Mean Abs: {mean_abs_val:.4f}")
+        print(f"   First Step Norm: {np.round(first_step_norm, 3)}")
+        # =========================
         action_pred_np = normalized_actions.detach().cpu().numpy()
         denormalized_actions = action_pred_np * self.action_std + self.action_mean
         
