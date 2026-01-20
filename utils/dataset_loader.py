@@ -715,37 +715,54 @@ class RobotDataset(Dataset):
         state_input_expanded = state_norm[0].unsqueeze(0).repeat(self.window_size, 1)
         action_target = state_norm[1:] # [64, 8]
 
-        # 3. Anchor (First Frame)
-        curr_idx = int(demo_key.split('_')[1])
-        anchor_key = f"demo_{(curr_idx//5)*5}"
+        # # 3. Anchor (First Frame)
+        # curr_idx = int(demo_key.split('_')[1])
+        # anchor_key = f"demo_{(curr_idx//5)*5}"
         
-        if anchor_key in self.anchor_bank:
-            first_frame = self.anchor_bank[anchor_key]
-            # 确保 Anchor 也被归一化 (如果 Bank 里存的是 Raw 0-1)
-            # 这里的 anchor_bank 在 init 时已经 /255.0 了，但还没 Normalize
-            # 简单起见，我们在使用时做 Normalize，或者确保 init 里不做
-            # 根据 init 代码：self.anchor_bank 存的是 /255.0 后的。
-            # 所以这里应用 Normalize
-            first_frame = torch.stack([
-                self.normalize(first_frame[0]), 
-                self.normalize(first_frame[1])
-            ], dim=0)
-        else:
-            # Fallback (使用当前序列首帧)
-            if self.in_memory:
-                # 再次从 Cache 取首帧 (indices=0)
-                m0 = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
-                w0 = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
-            else:
-                # 极端情况的 fallback，暂不处理 h5py 打开，直接用当前 batch 的第一帧近似
-                m0 = main_t[0] # 已经是 Norm 过的了
-                w0 = wrist_t[0]
-                # 注意：m0 w0 已经是 Normalized 的了，不需要再做
-                first_frame = torch.stack([m0, w0], dim=0)
-                # 跳过下面的 Normalize
+        # if anchor_key in self.anchor_bank:
+        #     first_frame = self.anchor_bank[anchor_key]
+        #     # 确保 Anchor 也被归一化 (如果 Bank 里存的是 Raw 0-1)
+        #     # 这里的 anchor_bank 在 init 时已经 /255.0 了，但还没 Normalize
+        #     # 简单起见，我们在使用时做 Normalize，或者确保 init 里不做
+        #     # 根据 init 代码：self.anchor_bank 存的是 /255.0 后的。
+        #     # 所以这里应用 Normalize
+        #     first_frame = torch.stack([
+        #         self.normalize(first_frame[0]), 
+        #         self.normalize(first_frame[1])
+        #     ], dim=0)
+        # else:
+        #     # Fallback (使用当前序列首帧)
+        #     if self.in_memory:
+        #         # 再次从 Cache 取首帧 (indices=0)
+        #         m0 = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
+        #         w0 = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
+        #     else:
+        #         # 极端情况的 fallback，暂不处理 h5py 打开，直接用当前 batch 的第一帧近似
+        #         m0 = main_t[0] # 已经是 Norm 过的了
+        #         w0 = wrist_t[0]
+        #         # 注意：m0 w0 已经是 Normalized 的了，不需要再做
+        #         first_frame = torch.stack([m0, w0], dim=0)
+        #         # 跳过下面的 Normalize
             
-            if 'first_frame' not in locals():
-                first_frame = torch.stack([self.normalize(m0), self.normalize(w0)], dim=0)
+        #     if 'first_frame' not in locals():
+        #         first_frame = torch.stack([self.normalize(m0), self.normalize(w0)], dim=0)
+
+
+
+        # ✅ 改为：无论是不是 Type A，都用自己的首帧
+        # (保持你现有的 fallback 逻辑，并确保归一化)
+        if self.in_memory:
+            m0_raw = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
+            w0_raw = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
+        else:
+            # ... 从 h5py 读取第 0 帧 ...
+            pass
+
+        first_frame = torch.stack([self.normalize(m0_raw), self.normalize(w0_raw)], dim=0)
+
+
+
+
 
         # 4. Teacher 默认值填充
         if teacher_siglip_tensor is None:

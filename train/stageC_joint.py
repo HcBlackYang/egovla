@@ -581,7 +581,7 @@ def train_stage_c(args):
             # 策略：90% 的时间完全 Mask 掉 Main View
             # 理由：推理时你只有 Wrist。如果训练时让它看到 Main，它就会依赖 Main。
             # 必须把它逼到“只能靠 Wrist + Latent”来决策的绝境。
-            if rand_val < 0.90:
+            if rand_val < 1.01:
                 video_input[:, 0] = 0.0
                 ff_input[:, 0] = 0.0
                 mask_type = "Simulate_Inference"
@@ -701,9 +701,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/114checkpoints_finetune')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/119checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/114StageB_ForeSight_step_3000.pt')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/119StageB_ForeSight_step_2500.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)
