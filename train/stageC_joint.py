@@ -616,11 +616,14 @@ def train_stage_c(args):
                 
                 # Loss 1: Action Diffusion Loss
                 loss_diff = F.mse_loss(pred_noise, noise)
-                # 🟢 [修改] 稀疏计算 Consistency Loss
-                if global_step % CONSISTENCY_FREQ == 0:
-                    loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
-                else:
-                    loss_cons = torch.tensor(0.0, device=device, requires_grad=True)
+                # # 🟢 [修改] 稀疏计算 Consistency Loss
+                # if global_step % CONSISTENCY_FREQ == 0:
+                #     loss_cons = compute_consistency_loss(fusion_encoder, batch, device)
+                # else:
+                #     loss_cons = torch.tensor(0.0, device=device, requires_grad=True)
+                # ✅ 修改后：直接禁用！
+                # 我们不希望模型在“看不见”的时候去瞎猜“看得见”的特征，这会导致它产生幻觉。
+                loss_cons = torch.tensor(0.0, device=device, requires_grad=True)
                 
                 # Loss 2: 🟢 [ForeSight] World Model Loss (MSE + Cosine)
                 # 必须与 Stage B 保持一致，防止微调时破坏 Latent 结构
@@ -701,9 +704,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/119checkpoints_finetune')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/120checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/119StageB_ForeSight_step_2500.pt')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/120StageB_ForeSight_step_2500.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)

@@ -329,7 +329,7 @@ VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 STATS_PATH = "/yanghaochuan/data/115dataset_stats.json" 
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
-STAGE_C_PATH = '/yanghaochuan/119checkpoints_finetune/StageC_ForeSight_step_5500.pt'
+STAGE_C_PATH = '/yanghaochuan/120checkpoints_finetune/StageC_ForeSight_step_6000.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

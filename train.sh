@@ -35,7 +35,7 @@ echo "🚀 Starting Stage B Training (VideoMAE Distillation)..."
 echo "-----------------------------------------------------------"
 
 # Stage B 输出的最终模型路径 (与 stageB_train.py 代码中的保存名一致)
-STAGE_B_FINAL_PATH="${OUTPUT_DIR}/119stageB_final.pt"
+STAGE_B_FINAL_PATH="${OUTPUT_DIR}/120stageB_final.pt"
 
 $PYTHON_EXE -u train/stageB_train.py \
     --data_root $DATA_ROOT \

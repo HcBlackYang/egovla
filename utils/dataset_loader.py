@@ -588,14 +588,35 @@ class RobotDataset(Dataset):
                     else:
                         has_teacher = 'teacher_siglip' in demo_grp
                     
-                    # 遍历每一个时间步
-                    for i in range(total_len - self.pred_horizon): 
-                        self.indices.append({
-                            'demo_key': demo_key, 
-                            'current_t': i, 
-                            'instruction': instr, 
-                            'has_teacher': has_teacher
-                        })
+                    # # 遍历每一个时间步
+                    # for i in range(total_len - self.pred_horizon): 
+                    #     self.indices.append({
+                    #         'demo_key': demo_key, 
+                    #         'current_t': i, 
+                    #         'instruction': instr, 
+                    #         'has_teacher': has_teacher
+                    #     })
+                    # 1. 判定当前 Demo 是否为 Type B (初始位置固定的数据)
+                    # 假设你的命名规则是 demo_0, demo_5, demo_10... 是 Type B
+                    curr_idx = int(demo_key.split('_')[1])
+                    is_type_b = (curr_idx % 5 == 0) 
+
+                    # 2. 设置重复次数
+                    # Type B (20条) 重复 4 次 -> 等效 80 条
+                    # Type A (80条) 重复 1 次 -> 等效 80 条
+                    # 这样总比例接近 1:1
+                    repeat_times = 4 if is_type_b else 1
+
+                    for _ in range(repeat_times):  # <--- 🟢 新增循环：实现过采样
+                        for i in range(total_len - self.pred_horizon): 
+                            self.indices.append({
+                                'demo_key': demo_key, 
+                                'current_t': i, 
+                                'instruction': instr, 
+                                'has_teacher': has_teacher
+                            })
+
+                    print(f"[Dataset Loader] Demo {demo_key} (Type B={is_type_b}) loaded {repeat_times} times.")
                         
         print(f"[Dataset] Loaded {len(self.indices)} samples.")
 
