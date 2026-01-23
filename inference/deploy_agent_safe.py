@@ -329,7 +329,7 @@ VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 STATS_PATH = "/yanghaochuan/data/115dataset_stats.json" 
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
-STAGE_C_PATH = '/yanghaochuan/120checkpoints_finetune/StageC_ForeSight_step_6000.pt'
+STAGE_C_PATH = '/yanghaochuan/121checkpoints_finetune/StageC_ForeSight_step_7000.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -415,7 +415,25 @@ class RealTimeAgent:
         if 'rdt_state_dict' in ckpt_c: self.policy.load_state_dict(ckpt_c['rdt_state_dict'], strict=False)
         else: self.policy.load_state_dict(ckpt_c, strict=False)
         
-        if 'encoder_state_dict' in ckpt_c: self.encoder.load_state_dict(ckpt_c['encoder_state_dict'], strict=False)
+        # if 'encoder_state_dict' in ckpt_c: self.encoder.load_state_dict(ckpt_c['encoder_state_dict'], strict=False)
+        if 'encoder_state_dict' in ckpt_c: 
+            print("正在加载 Encoder 权重...")
+            state_dict = ckpt_c['encoder_state_dict']
+            
+            # 🛠️ 修复：移除编译或DDP产生的前缀
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                k_clean = k.replace("_orig_mod.", "").replace("module.", "")
+                new_state_dict[k_clean] = v
+            
+            # 🔍 诊断：不要用 strict=False，或者打印返回值
+            missing, unexpected = self.encoder.load_state_dict(new_state_dict, strict=False)
+            
+            if len(missing) > 0:
+                print(f"⚠️ 警告：Encoder 加载有丢失键! (数量: {len(missing)})")
+                print(f"   示例丢失: {missing[:5]}")
+            else:
+                print("✅ Encoder 权重完美加载！")
 
     def _init_scheduler(self):
         self.scheduler = DDIMScheduler(num_train_timesteps=1000, beta_schedule="squaredcos_cap_v2", prediction_type="epsilon", clip_sample=True)

@@ -405,7 +405,7 @@ from losses.distillation_loss import DistillationLoss
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 # 🟢 请确保这里指向正确的统计文件
-STATS_PATH = '/yanghaochuan/data/111dataset_stats.json' 
+STATS_PATH = '/yanghaochuan/data/121dataset_stats.json' 
 
 def train_stage_c(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -575,21 +575,51 @@ def train_stage_c(args):
             rand_val = torch.rand(1).item()
             mask_type = "Wrist_Only" # 默认状态
             
+            # video_input = video.clone()
+            # ff_input = ff.clone()
+            
+            # # 策略：90% 的时间完全 Mask 掉 Main View
+            # # 理由：推理时你只有 Wrist。如果训练时让它看到 Main，它就会依赖 Main。
+            # # 必须把它逼到“只能靠 Wrist + Latent”来决策的绝境。
+            # if rand_val < 1.01:
+            #     video_input[:, 0] = 0.0
+            #     ff_input[:, 0] = 0.0
+            #     mask_type = "Simulate_Inference"
+            
+            # # 剩下 10%：Teacher Guidance (全可见)
+            # # 仅用于维持 Encoder 的特征稳定性，不让它彻底遗忘 Stage B 学到的全图特征。
+            # else:
+            #     mask_type = "Teacher_Guidance"
+
+
+
+            rand_val = torch.rand(1).item()
+            
             video_input = video.clone()
             ff_input = ff.clone()
             
-            # 策略：90% 的时间完全 Mask 掉 Main View
-            # 理由：推理时你只有 Wrist。如果训练时让它看到 Main，它就会依赖 Main。
-            # 必须把它逼到“只能靠 Wrist + Latent”来决策的绝境。
-            if rand_val < 1.01:
-                video_input[:, 0] = 0.0
-                ff_input[:, 0] = 0.0
-                mask_type = "Simulate_Inference"
-            
-            # 剩下 10%：Teacher Guidance (全可见)
-            # 仅用于维持 Encoder 的特征稳定性，不让它彻底遗忘 Stage B 学到的全图特征。
+            if rand_val < 0.5:
+                # [Mode A: Inference Simulation] (50%)
+                # 模拟真实推理：Main Camera 丢失，只有 Wrist Camera
+                # 目的：适应部分可观测环境
+                video_input[:, 0] = 0.0 # Mask Main
+                ff_input[:, 0] = 0.0    # Mask First Frame Main
+                mask_type = "Inference_Mode (Wrist Only)"
+                
+            elif rand_val < 0.8:
+                # [Mode B: Total Blindness] (30%)
+                # 模拟全盲：Main + Wrist 全部丢失
+                # 目的：强迫模型必须依赖 State (Proprioception)
+                # 此时 Encoder 输出的 e_t 几乎没有视觉信息，Action 生成全靠 State Injection
+                video_input[:] = 0.0 
+                ff_input[:] = 0.0
+                mask_type = "Blind_Mode (State Only)"
+                
             else:
-                mask_type = "Teacher_Guidance"
+                # [Mode C: Teacher Guidance] (20%)
+                # 全可见：Main + Wrist 都有
+                # 目的：维持 VideoMAE 的特征提取能力，防止灾难性遗忘，并提供语义锚点
+                mask_type = "Teacher_Mode (Full View)"
 
 
             CONSISTENCY_FREQ = 5
@@ -704,7 +734,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/120checkpoints_finetune')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/121checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
     parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/120StageB_ForeSight_step_2500.pt')
     parser.add_argument('--batch_size', type=int, default=32)
