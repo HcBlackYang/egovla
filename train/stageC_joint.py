@@ -405,7 +405,7 @@ from losses.distillation_loss import DistillationLoss
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 # 🟢 请确保这里指向正确的统计文件
-STATS_PATH = '/yanghaochuan/data/121dataset_stats.json' 
+STATS_PATH = '/yanghaochuan/data/124dataset_stats.json' 
 
 def train_stage_c(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
