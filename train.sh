@@ -35,7 +35,7 @@ echo "🚀 Starting Stage B Training (VideoMAE Distillation)..."
 echo "-----------------------------------------------------------"
 
 # Stage B 输出的最终模型路径 (与 stageB_train.py 代码中的保存名一致)
-STAGE_B_FINAL_PATH="${OUTPUT_DIR}/120stageB_final.pt"
+STAGE_B_FINAL_PATH="${OUTPUT_DIR}/124stageB_final.pt"
 
 $PYTHON_EXE -u train/stageB_train.py \
     --data_root $DATA_ROOT \
@@ -43,7 +43,7 @@ $PYTHON_EXE -u train/stageB_train.py \
     --stage_a_ckpt $STAGE_A_CKPT \
     --batch_size 16 \
     --gradient_accumulation_steps 4 \
-    --max_train_steps 10000 \
+    --max_train_steps 5000 \
     --checkpointing_steps 500 \
     --use_wandb
 

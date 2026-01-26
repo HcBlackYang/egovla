@@ -734,9 +734,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
     parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/121checkpoints_finetune')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/124checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/120StageB_ForeSight_step_2500.pt')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/124StageB_ForeSight_step_4000.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)
