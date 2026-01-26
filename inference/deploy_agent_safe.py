@@ -354,6 +354,7 @@ class RealTimeAgent:
         self.device = DEVICE
         self.safety = SafetyController() 
         self.pred_horizon = 64
+        self.trajectory_offset = None
         
         # 🟢 [Alignment] 与 dataset_loader.py 保持一致
         self.history_len = 500       # 模拟 dataset 中的 history_len
@@ -517,6 +518,8 @@ class RealTimeAgent:
         if abs(norm_qpos[0]) > 3.0:
             print("⚠️ 警告：初始状态严重偏离训练分布 (OOD)！模型可能会失效！")
         # ============================
+        self.trajectory_offset = None  # 新增：确保每次新动作开始时重新计算对齐
+        print("[Agent] Trajectory offset reset.")
 
     @torch.no_grad()
     def step(self, frames_list, current_qpos):
@@ -597,6 +600,32 @@ class RealTimeAgent:
         raw_gripper_pred = denormalized_actions[:, 7]
         binary_gripper = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
         denormalized_actions[:, 7] = binary_gripper
+
+        if self.trajectory_offset is None:
+            # 计算模型预测的第 0 步与当前机器人真实位置的差值
+            # 只针对前 7 个关节 (J0-J6)
+            pred_start = denormalized_actions[0, :7]
+            real_start = qpos_np[:7]
+            self.trajectory_offset = pred_start - real_start
+            print(f"🚩 [Aligner] Offset calculated: {self.trajectory_offset}")
+            
+        # === 将打印逻辑移到这里 ===
+        print(f"\n{'='*25} ALIGNED RDT Action (First 15 Steps) {'='*25}")
+        header = f"{'Step':<4} | {'J0':^7} {'J1':^7} {'J2':^7} {'J3':^7} {'J4':^7} {'J5':^7} {'J6':^7} | {'Grip':^6}"
+        print(header)
+        for i in range(min(15, len(denormalized_actions))):
+            step_data = denormalized_actions[i]
+            joints_str = " ".join([f"{x: .4f}" for x in step_data[:7]])
+            print(f"{i:<4} | {joints_str} | {step_data[7]:.4f}")
+        # ========================
+
+
+        # 1. 获取实时位置 (qpos_np 是你在 step 开始时处理好的当前物理状态)
+        real_start_pos = qpos_np[:8] 
+
+        # 2. 强制覆盖 Step 0，确保物理层面绝对重合
+        # 这样机器人执行第一个动作时就不会有任何“瞬跳”
+        denormalized_actions[0, :8] = real_start_pos
         
         # 简单日志
         print(f"   >>> [Infer] BufferLen: {curr_len} | Pred J0: {denormalized_actions[0,0]:.3f}", end='\r')
