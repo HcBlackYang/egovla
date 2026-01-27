@@ -593,45 +593,85 @@ class RealTimeAgent:
         denormalized_actions = action_pred_np * self.action_std + self.action_mean
         
         # 夹爪二值化
-        GRIPPER_OPEN_VAL = 0.0804  
-        GRIPPER_CLOSE_VAL = 0.0428 
-        GRIPPER_THRESHOLD = 0.0616 
+        # GRIPPER_OPEN_VAL = 0.0804  
+        # GRIPPER_CLOSE_VAL = 0.0428 
+        # GRIPPER_THRESHOLD = 0.0616 
 
-        raw_gripper_pred = denormalized_actions[:, 7]
-        binary_gripper = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
-        denormalized_actions[:, 7] = binary_gripper
+        # raw_gripper_pred = denormalized_actions[:, 7]
+        # binary_gripper = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
+        # denormalized_actions[:, 7] = binary_gripper
 
-        if self.trajectory_offset is None:
-            # 计算模型预测的第 0 步与当前机器人真实位置的差值
-            # 只针对前 7 个关节 (J0-J6)
-            pred_start = denormalized_actions[0, :7]
-            real_start = qpos_np[:7]
-            self.trajectory_offset = pred_start - real_start
-            print(f"🚩 [Aligner] Offset calculated: {self.trajectory_offset}")
+        # if self.trajectory_offset is None:
+        #     # 计算模型预测的第 0 步与当前机器人真实位置的差值
+        #     # 只针对前 7 个关节 (J0-J6)
+        #     pred_start = denormalized_actions[0, :7]
+        #     real_start = qpos_np[:7]
+        #     self.trajectory_offset = pred_start - real_start
+        #     print(f"🚩 [Aligner] Offset calculated: {self.trajectory_offset}")
             
-        # === 将打印逻辑移到这里 ===
-        print(f"\n{'='*25} ALIGNED RDT Action (First 15 Steps) {'='*25}")
-        header = f"{'Step':<4} | {'J0':^7} {'J1':^7} {'J2':^7} {'J3':^7} {'J4':^7} {'J5':^7} {'J6':^7} | {'Grip':^6}"
-        print(header)
-        for i in range(min(15, len(denormalized_actions))):
-            step_data = denormalized_actions[i]
-            joints_str = " ".join([f"{x: .4f}" for x in step_data[:7]])
-            print(f"{i:<4} | {joints_str} | {step_data[7]:.4f}")
-        # ========================
+        # # === 将打印逻辑移到这里 ===
+        # print(f"\n{'='*25} ALIGNED RDT Action (First 15 Steps) {'='*25}")
+        # header = f"{'Step':<4} | {'J0':^7} {'J1':^7} {'J2':^7} {'J3':^7} {'J4':^7} {'J5':^7} {'J6':^7} | {'Grip':^6}"
+        # print(header)
+        # for i in range(min(15, len(denormalized_actions))):
+        #     step_data = denormalized_actions[i]
+        #     joints_str = " ".join([f"{x: .4f}" for x in step_data[:7]])
+        #     print(f"{i:<4} | {joints_str} | {step_data[7]:.4f}")
+        # # ========================
 
 
-        # 1. 获取实时位置 (qpos_np 是你在 step 开始时处理好的当前物理状态)
-        real_start_pos = qpos_np[:8] 
+        # # 1. 获取实时位置 (qpos_np 是你在 step 开始时处理好的当前物理状态)
+        # real_start_pos = qpos_np[:8] 
 
-        # 2. 强制覆盖 Step 0，确保物理层面绝对重合
-        # 这样机器人执行第一个动作时就不会有任何“瞬跳”
-        denormalized_actions[0, :8] = real_start_pos
+        # # 2. 强制覆盖 Step 0，确保物理层面绝对重合
+        # # 这样机器人执行第一个动作时就不会有任何“瞬跳”
+        # denormalized_actions[0, :8] = real_start_pos
         
-        # 简单日志
-        print(f"   >>> [Infer] BufferLen: {curr_len} | Pred J0: {denormalized_actions[0,0]:.3f}", end='\r')
+        # # 简单日志
+        # print(f"   >>> [Infer] BufferLen: {curr_len} | Pred J0: {denormalized_actions[0,0]:.3f}", end='\r')
         
+        # safe_actions = self.safety.clip_actions(denormalized_actions)
+        # return safe_actions.tolist()
+
+        # 2. 轨迹对齐逻辑 (Trajectory Aligner)
+        if self.trajectory_offset is None:
+            # 记录模型预测的起点与真实起点的偏差
+            # 注意：这里必须使用 .copy() 避免引用干扰
+            pred_start = denormalized_actions[0, :7].copy()
+            real_start = qpos_np[:7].copy()
+            self.trajectory_offset = pred_start - real_start
+            print(f"\n   🔧 [Aligner] Calibration Done. Offset J0: {self.trajectory_offset[0]:.4f}")
+
+        # 3. 应用对齐：减去全局偏差
+        denormalized_actions[:, :7] -= self.trajectory_offset
+
+        # 4. 【关键修复】物理强制覆盖 (Physical Overwrite)
+        # 无论模型预测和对齐计算结果如何，强制第一步绝对等于当前物理位置
+        # 这消除了所有计算残差，保证起步绝对平滑
+        denormalized_actions[0, :7] = qpos_np[:7]
+
+        # 5. 夹爪二值化处理
+        GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL, GRIPPER_THRESHOLD = 0.0804, 0.0428, 0.0616
+        raw_gripper_pred = denormalized_actions[:, 7]
+        denormalized_actions[:, 7] = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
+
+        # 6. 【统一打印】在所有修正完成后再打印动作表
+        self._print_aligned_table(denormalized_actions)
+
+        # 7. 安全裁剪并返回
         safe_actions = self.safety.clip_actions(denormalized_actions)
         return safe_actions.tolist()
+
+    def _print_aligned_table(self, actions):
+        """辅助方法：打印最终发送给机械臂的动作序列"""
+        print(f"\n{'='*25} FINAL EXECUTABLE ACTION (Step 0-14) {'='*25}")
+        header = f"{'Step':<4} | {'J0':^7} {'J1':^7} {'J2':^7} {'J3':^7} {'J4':^7} {'J5':^7} {'J6':^7} | {'Grip':^6}"
+        print(header)
+        print("-" * 82)
+        for i in range(15):
+            joints = actions[i, :7]
+            print(f"{i:<4} | {' '.join([f'{x: .4f}' for x in joints])} | {actions[i, 7]:.4f}")
+        print("=" * 82 + "\n")
 
 
 # #ego双视角
