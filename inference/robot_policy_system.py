@@ -1,4 +1,286 @@
-# ego项目
+# # ego项目
+# import sys
+# import os
+# import time
+# import logging
+# import cv2
+# import numpy as np
+# import math
+# import threading
+# from collections import deque
+# from common.constants import ActionSpace
+# from robots.franky_env import FrankyEnv
+# from robots.robot_param import RobotParam
+# from systems.tcp_client import TCPClientPolicy 
+# from cameras.realsense_env import RealSenseEnv
+
+# # 配置日志格式
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# class ImageRecorder(threading.Thread):
+#     def __init__(self, camera, buffer_size=16):
+#         super().__init__()
+#         self.camera = camera
+#         self.buffer_size = buffer_size
+#         self.running = False
+#         self.lock = threading.Lock()
+        
+#         self.latest_frame = None
+#         self.frame_buffer = deque(maxlen=buffer_size) 
+#         self.stop_event = threading.Event()
+        
+#         # 🟢 [新增] 录制控制标志位
+#         self.is_recording = True 
+
+#     def run(self):
+#         self.running = True
+#         self.camera.start_monitoring()
+#         logging.info("[ImageRecorder] Background thread started.")
+        
+#         while not self.stop_event.is_set():
+#             data = self.camera.get_latest_frame()
+#             if data is not None:
+#                 img = data['bgr']
+                
+#                 # 🟢 [修改] 只有在“录制模式”下才更新 Buffer 和 Latest Frame
+#                 # 这样可以防止推理等待期间的静止帧污染 Buffer
+#                 if self.is_recording:
+#                     with self.lock:
+#                         self.latest_frame = img.copy()
+#                         self.frame_buffer.append(img)
+                
+#                 # 实时显示保持常开，方便人工观察 (不会影响 Buffer)
+#                 cv2.imshow("Wrist View (Real-time)", img)
+#                 if cv2.waitKey(1) & 0xFF == ord('q'):
+#                     self.stop_event.set()
+            
+#             # 保持 30Hz 采样
+#             time.sleep(0.033) 
+        
+#         cv2.destroyAllWindows()
+#         logging.info("[ImageRecorder] Stopped.")
+
+#     def get_latest_image(self):
+#         with self.lock:
+#             if self.latest_frame is None: return None
+#             return self.latest_frame.copy()
+
+#     def pause_recording(self):
+#         """暂停更新 Buffer (推理期间调用)"""
+#         self.is_recording = False
+        
+#     def resume_recording(self):
+#         """恢复更新 Buffer (运动期间调用)"""
+#         self.is_recording = True
+
+#     def stop(self):
+#         self.stop_event.set()
+#         self.join()
+
+# class RobotPolicySystem:
+#     def __init__(self, action_space: ActionSpace = ActionSpace.JOINT_ANGLES, ip: str = "127.0.0.1", port: int = 6000):
+#         self.action_space = action_space
+        
+#         # 初始化机器人
+#         self.robot_env = FrankyEnv(
+#             action_space=action_space, 
+#             inference_mode=True, 
+#             robot_param=RobotParam(np.array([ 0.0, 0.0, -math.pi / 2]), np.array([ 0.53433071, 0.52905707, 0.00440881]))
+#         )
+        
+#         logging.info(f"Connecting to {ip}:{port}...")
+#         self.client = TCPClientPolicy(host=ip, port=port)
+#         logging.info("Connected.")
+        
+#         # 初始化相机
+#         self.wrist_camera = RealSenseEnv(camera_name="wrist_image", serial_number="342222072092", width=1280, height=720)
+#         self.recorder = ImageRecorder(self.wrist_camera, buffer_size=16)
+        
+#         # 夹爪状态记录
+#         self.gripper_status = {"current_state": 0}
+#         self.stop_evaluation = threading.Event()
+
+
+#     def wait_until_still(self, velocity_threshold=0.05, required_stable_frames=3):
+#         """
+#         [死等模式] 阻塞程序，直到机械臂物理上完全静止。
+#         不设超时，必须等到速度降下来为止。
+#         """
+#         t_start = time.time()
+#         last_pos = np.array(self.robot_env.get_position(ActionSpace.JOINT_ANGLES))
+#         stable_counter = 0 
+        
+#         print(f"\n      🛑 Waiting for stop (Threshold: {velocity_threshold})...")
+        
+#         while True: # 🟢 死循环，直到满足条件 return
+#             time.sleep(0.05) 
+#             curr_pos = np.array(self.robot_env.get_position(ActionSpace.JOINT_ANGLES))
+            
+#             # 计算速度
+#             diff = np.abs(curr_pos - last_pos)
+#             velocity = np.max(diff) / 0.05
+            
+#             # 🟢 只有速度真的降下来 (<0.05)，才开始计数
+#             if velocity < velocity_threshold:
+#                 stable_counter += 1
+#             else:
+#                 stable_counter = 0 # 只要还在动 (0.13 > 0.05)，计数器就归零
+            
+#             # 打印状态 (覆盖当前行)
+#             # 你会看到速度从 0.13 慢慢降到 0.00x，然后 Stable 变成 3/3
+#             waited_time = time.time() - t_start
+#             print(f"      ⏳ Speed: {velocity:.4f} | Stable: {stable_counter}/{required_stable_frames} | Time: {waited_time:.1f}s", end='\r')
+            
+#             if stable_counter >= required_stable_frames:
+#                 print(f"                                                                      ", end='\r')
+#                 print(f"      ✅ Stopped! (Speed: {velocity:.4f} | Waited: {waited_time:.2f}s)")
+#                 return
+            
+#             last_pos = curr_pos
+
+#     def run(self, task_name: str = "default_task"):
+#         self.recorder.start()
+#         logging.info("Waiting 2.0s for warmup...")
+#         time.sleep(2.0)
+        
+#         # 🟢 [保持] 15步 (0.5s) 符合 Diffusion 训练分布
+#         EXECUTION_HORIZON = 15  
+#         MAX_STEP_RAD = 0.08     
+#         last_executed_joints = None
+        
+#         GRIPPER_THRESHOLD = 0.06 
+        
+#         logging.info(f"Starting SYNCHRONOUS inference loop... (Horizon: {EXECUTION_HORIZON})")
+
+#         try:
+#             while not self.stop_evaluation.is_set():
+#                 if not self.recorder.is_alive(): break
+
+
+#                 # 等到底层动作彻底跑完，消除积压
+#                 self.wait_until_still()
+#                 # =========================================================
+#                 # Phase 1: 准备推理 (Stop & Freeze)
+#                 # =========================================================
+#                 # 🟢 [DEBUG] 打印：准备暂停
+#                 print("\n" + "="*50)
+#                 print("[Phase 1] 🛑 Pausing Camera... (Now Robot is TRULY Still)")
+#                 self.recorder.pause_recording()
+                
+#                 t0 = time.time()
+                
+#                 # 🟢 2. 获取定格的图像
+#                 latest_img = self.recorder.get_latest_image()
+#                 if latest_img is None:
+#                     self.recorder.resume_recording() # 如果获取失败，先恢复录制再重试
+#                     time.sleep(0.01)
+#                     continue
+                
+#                 wrist_images = [latest_img]
+
+#                 # 3. 获取当前状态 (机器人此时是静止的)
+#                 joint_angles = self.robot_env.get_position(action_space=ActionSpace.JOINT_ANGLES)
+#                 gripper_width = self.robot_env.get_gripper_width()
+#                 eef_pose = self.robot_env.get_position(action_space=ActionSpace.EEF_POSE)
+                
+#                 qpos_8d = list(joint_angles) + [float(gripper_width)]
+#                 state = np.concatenate([eef_pose, [gripper_width]])
+                
+#                 element = {
+#                     "observation/wrist_image": wrist_images,
+#                     "observation/state": state,
+#                     "qpos": qpos_8d, 
+#                     "prompt": task_name,
+#                 }
+
+#                 # =========================================================
+#                 # Phase 2: 推理 (Inference) - 机器人静止，Buffer 不更新
+#                 # =========================================================
+#                 # 🟢 [DEBUG] 打印：开始推理
+#                 print(f"[Phase 2] 🧠 Inferring... (Buffer is LOCKED)")
+                
+#                 inference_results = self.client.infer(element)
+                
+#                 infer_time = (time.time() - t0) * 1000
+#                 print(f"          ✅ Inference Done in {infer_time:.1f}ms")
+                
+#                 # =========================================================
+#                 # Phase 3: 执行 (Resume & Move)
+#                 # =========================================================
+                
+#                 # 🟢 4. 恢复录制！
+#                 # 机器人即将开始运动，我们需要记录这些运动帧，供下一次推理使用
+#                 # 🟢 [DEBUG] 打印：恢复录制
+#                 print("[Phase 3] ▶️ Resuming Camera & Executing Actions...")
+#                 self.recorder.resume_recording()
+
+#                 if inference_results and "actions" in inference_results:
+#                     new_actions = inference_results["actions"][0]
+#                     if isinstance(new_actions, list) and len(new_actions) > 0:
+
+#                         actions_to_execute = new_actions[:EXECUTION_HORIZON]
+#                         # print(f"  >>> Executing {len(actions_to_execute)} steps...")
+
+#                         for action in actions_to_execute:
+#                             if not isinstance(action, (list, tuple, np.ndarray)): continue
+                            
+#                             action_np = np.array(action, dtype=np.float64)
+#                             if np.all(action_np == 0) or np.isnan(action_np).any(): break
+                            
+#                             target_joints = action_np[:-1]
+#                             gripper_val = action_np[-1]
+
+#                             # 平滑限幅
+#                             if last_executed_joints is not None:
+#                                 diff = np.clip(target_joints - last_executed_joints, -MAX_STEP_RAD, MAX_STEP_RAD)
+#                                 target_joints = last_executed_joints + diff
+                            
+#                             last_executed_joints = target_joints.copy()
+
+#                             # 执行运动
+#                             t_step_start = time.time()
+#                             self.robot_env.step(target_joints, asynchronous=True)
+                            
+#                             # 夹爪逻辑
+#                             if gripper_val > GRIPPER_THRESHOLD:
+#                                 if self.gripper_status["current_state"] != -1:
+#                                     logging.info(f"👐 Open ({gripper_val:.3f})")
+#                                     self.robot_env.open_gripper(asynchronous=True)
+#                                     self.gripper_status["current_state"] = -1
+#                             elif gripper_val < GRIPPER_THRESHOLD:
+#                                 if self.gripper_status["current_state"] != 1:
+#                                     logging.info(f"✊ Close ({gripper_val:.3f})")
+#                                     self.robot_env.close_gripper(asynchronous=True)
+#                                     self.gripper_status["current_state"] = 1
+                            
+#                             # 控频 (30Hz)
+#                             remain = 0.0333 - (time.time() - t_step_start)
+#                             if remain > 0: time.sleep(remain)
+
+#                 latency = (time.time() - t0) * 1000
+#                 print(f"\rStep Latency: {latency:.1f}ms | Grip: {gripper_val:.4f}", end="")
+
+#         except KeyboardInterrupt:
+#             logging.info("Keyboard Interrupt received.")
+#         except Exception as e:
+#             logging.error(f"Runtime Error: {e}")
+#         finally:
+#             self.stop()
+
+#     def stop(self):
+#         self.stop_evaluation.set()
+#         if self.recorder.is_alive():
+#             self.recorder.stop()
+#         time.sleep(0.5)
+#         logging.info("System stopped.")
+
+# if __name__ == "__main__":
+#     system = RobotPolicySystem(ip="127.0.0.1", port=6000)
+#     system.run(task_name="pick up the orange ball and put it on the plank")
+
+
+
+# ego纯数据项目
 import sys
 import os
 import time
@@ -29,7 +311,7 @@ class ImageRecorder(threading.Thread):
         self.frame_buffer = deque(maxlen=buffer_size) 
         self.stop_event = threading.Event()
         
-        # 🟢 [新增] 录制控制标志位
+        # 录制控制标志位
         self.is_recording = True 
 
     def run(self):
@@ -42,19 +324,17 @@ class ImageRecorder(threading.Thread):
             if data is not None:
                 img = data['bgr']
                 
-                # 🟢 [修改] 只有在“录制模式”下才更新 Buffer 和 Latest Frame
-                # 这样可以防止推理等待期间的静止帧污染 Buffer
+                # 只有在“录制模式”下才更新 Buffer 和 Latest Frame
                 if self.is_recording:
                     with self.lock:
                         self.latest_frame = img.copy()
                         self.frame_buffer.append(img)
                 
-                # 实时显示保持常开，方便人工观察 (不会影响 Buffer)
+                # 实时显示保持常开
                 cv2.imshow("Wrist View (Real-time)", img)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     self.stop_event.set()
             
-            # 保持 30Hz 采样
             time.sleep(0.033) 
         
         cv2.destroyAllWindows()
@@ -66,11 +346,11 @@ class ImageRecorder(threading.Thread):
             return self.latest_frame.copy()
 
     def pause_recording(self):
-        """暂停更新 Buffer (推理期间调用)"""
+        """暂停更新 Buffer"""
         self.is_recording = False
         
     def resume_recording(self):
-        """恢复更新 Buffer (运动期间调用)"""
+        """恢复更新 Buffer"""
         self.is_recording = True
 
     def stop(self):
@@ -104,36 +384,31 @@ class RobotPolicySystem:
     def wait_until_still(self, velocity_threshold=0.05, required_stable_frames=3):
         """
         [死等模式] 阻塞程序，直到机械臂物理上完全静止。
-        不设超时，必须等到速度降下来为止。
         """
         t_start = time.time()
         last_pos = np.array(self.robot_env.get_position(ActionSpace.JOINT_ANGLES))
         stable_counter = 0 
         
-        print(f"\n      🛑 Waiting for stop (Threshold: {velocity_threshold})...")
+        print(f"\n      🛑 Waiting for stop...")
         
-        while True: # 🟢 死循环，直到满足条件 return
+        while True:
             time.sleep(0.05) 
             curr_pos = np.array(self.robot_env.get_position(ActionSpace.JOINT_ANGLES))
             
-            # 计算速度
             diff = np.abs(curr_pos - last_pos)
             velocity = np.max(diff) / 0.05
             
-            # 🟢 只有速度真的降下来 (<0.05)，才开始计数
             if velocity < velocity_threshold:
                 stable_counter += 1
             else:
-                stable_counter = 0 # 只要还在动 (0.13 > 0.05)，计数器就归零
+                stable_counter = 0
             
-            # 打印状态 (覆盖当前行)
-            # 你会看到速度从 0.13 慢慢降到 0.00x，然后 Stable 变成 3/3
             waited_time = time.time() - t_start
             print(f"      ⏳ Speed: {velocity:.4f} | Stable: {stable_counter}/{required_stable_frames} | Time: {waited_time:.1f}s", end='\r')
             
             if stable_counter >= required_stable_frames:
                 print(f"                                                                      ", end='\r')
-                print(f"      ✅ Stopped! (Speed: {velocity:.4f} | Waited: {waited_time:.2f}s)")
+                print(f"      ✅ Stopped! (Waited: {waited_time:.2f}s)")
                 return
             
             last_pos = curr_pos
@@ -143,10 +418,8 @@ class RobotPolicySystem:
         logging.info("Waiting 2.0s for warmup...")
         time.sleep(2.0)
         
-        # 🟢 [保持] 15步 (0.5s) 符合 Diffusion 训练分布
         EXECUTION_HORIZON = 15  
-        MAX_STEP_RAD = 0.08     
-        last_executed_joints = None
+        MAX_STEP_RAD = 0.05     # 调小限幅，用于平滑处理初始预测跳变
         
         GRIPPER_THRESHOLD = 0.06 
         
@@ -156,29 +429,23 @@ class RobotPolicySystem:
             while not self.stop_evaluation.is_set():
                 if not self.recorder.is_alive(): break
 
-
-                # 等到底层动作彻底跑完，消除积压
+                # 等到底层动作彻底跑完
                 self.wait_until_still()
-                # =========================================================
+
                 # Phase 1: 准备推理 (Stop & Freeze)
-                # =========================================================
-                # 🟢 [DEBUG] 打印：准备暂停
                 print("\n" + "="*50)
-                print("[Phase 1] 🛑 Pausing Camera... (Now Robot is TRULY Still)")
+                print("[Phase 1] 🛑 Pausing Camera... (Freezing latest frame)")
                 self.recorder.pause_recording()
                 
                 t0 = time.time()
                 
-                # 🟢 2. 获取定格的图像
                 latest_img = self.recorder.get_latest_image()
                 if latest_img is None:
-                    self.recorder.resume_recording() # 如果获取失败，先恢复录制再重试
+                    self.recorder.resume_recording()
                     time.sleep(0.01)
                     continue
                 
-                wrist_images = [latest_img]
-
-                # 3. 获取当前状态 (机器人此时是静止的)
+                # 获取当前真实状态
                 joint_angles = self.robot_env.get_position(action_space=ActionSpace.JOINT_ANGLES)
                 gripper_width = self.robot_env.get_gripper_width()
                 eef_pose = self.robot_env.get_position(action_space=ActionSpace.EEF_POSE)
@@ -187,59 +454,42 @@ class RobotPolicySystem:
                 state = np.concatenate([eef_pose, [gripper_width]])
                 
                 element = {
-                    "observation/wrist_image": wrist_images,
+                    "observation/wrist_image": [latest_img],
                     "observation/state": state,
                     "qpos": qpos_8d, 
                     "prompt": task_name,
                 }
 
-                # =========================================================
-                # Phase 2: 推理 (Inference) - 机器人静止，Buffer 不更新
-                # =========================================================
-                # 🟢 [DEBUG] 打印：开始推理
-                print(f"[Phase 2] 🧠 Inferring... (Buffer is LOCKED)")
-                
+                # Phase 2: 推理
+                print(f"[Phase 2] 🧠 Inferring...")
                 inference_results = self.client.infer(element)
                 
                 infer_time = (time.time() - t0) * 1000
                 print(f"          ✅ Inference Done in {infer_time:.1f}ms")
                 
-                # =========================================================
                 # Phase 3: 执行 (Resume & Move)
-                # =========================================================
-                
-                # 🟢 4. 恢复录制！
-                # 机器人即将开始运动，我们需要记录这些运动帧，供下一次推理使用
-                # 🟢 [DEBUG] 打印：恢复录制
                 print("[Phase 3] ▶️ Resuming Camera & Executing Actions...")
                 self.recorder.resume_recording()
 
                 if inference_results and "actions" in inference_results:
-                    new_actions = inference_results["actions"][0]
-                    if isinstance(new_actions, list) and len(new_actions) > 0:
-
+                    new_actions = np.array(inference_results["actions"][0])
+                    if len(new_actions) > 0:
                         actions_to_execute = new_actions[:EXECUTION_HORIZON]
-                        # print(f"  >>> Executing {len(actions_to_execute)} steps...")
 
                         for action in actions_to_execute:
-                            if not isinstance(action, (list, tuple, np.ndarray)): continue
-                            
-                            action_np = np.array(action, dtype=np.float64)
-                            if np.all(action_np == 0) or np.isnan(action_np).any(): break
-                            
-                            target_joints = action_np[:-1]
-                            gripper_val = action_np[-1]
+                            # 核心改进：直接使用模型预测的绝对目标角度，但在执行层做平滑限幅
+                            target_joints_raw = action[:7]
+                            gripper_val = action[7]
 
-                            # 平滑限幅
-                            if last_executed_joints is not None:
-                                diff = np.clip(target_joints - last_executed_joints, -MAX_STEP_RAD, MAX_STEP_RAD)
-                                target_joints = last_executed_joints + diff
-                            
-                            last_executed_joints = target_joints.copy()
+                            # 获取机器人实时角度并计算限幅后的安全目标
+                            curr_joints = np.array(self.robot_env.get_position(ActionSpace.JOINT_ANGLES))
+                            diff = target_joints_raw - curr_joints
+                            limited_diff = np.clip(diff, -MAX_STEP_RAD, MAX_STEP_RAD)
+                            safe_target = curr_joints + limited_diff
 
                             # 执行运动
                             t_step_start = time.time()
-                            self.robot_env.step(target_joints, asynchronous=True)
+                            self.robot_env.step(safe_target, asynchronous=True)
                             
                             # 夹爪逻辑
                             if gripper_val > GRIPPER_THRESHOLD:
@@ -253,12 +503,12 @@ class RobotPolicySystem:
                                     self.robot_env.close_gripper(asynchronous=True)
                                     self.gripper_status["current_state"] = 1
                             
-                            # 控频 (30Hz)
-                            remain = 0.0333 - (time.time() - t_step_start)
+                            # 控频 (25Hz - 30Hz)
+                            remain = 0.04 - (time.time() - t_step_start)
                             if remain > 0: time.sleep(remain)
 
                 latency = (time.time() - t0) * 1000
-                print(f"\rStep Latency: {latency:.1f}ms | Grip: {gripper_val:.4f}", end="")
+                print(f"\rStep Latency: {latency:.1f}ms", end="")
 
         except KeyboardInterrupt:
             logging.info("Keyboard Interrupt received.")
@@ -277,7 +527,6 @@ class RobotPolicySystem:
 if __name__ == "__main__":
     system = RobotPolicySystem(ip="127.0.0.1", port=6000)
     system.run(task_name="pick up the orange ball and put it on the plank")
-
 
 
 # # ego项目
