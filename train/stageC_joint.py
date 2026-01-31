@@ -405,7 +405,7 @@ from losses.distillation_loss import DistillationLoss
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
 # 🟢 请确保这里指向正确的统计文件
-STATS_PATH = '/yanghaochuan/data/124dataset_stats.json' 
+STATS_PATH = '/yanghaochuan/data/130dataset_stats.json' 
 
 def train_stage_c(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -733,10 +733,10 @@ def train_stage_c(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
-    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/124checkpoints_finetune')
+    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_binary.hdf5')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/130checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
-    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/124StageB_ForeSight_step_4000.pt')
+    parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/130StageB_ForeSight_step_3000.pt')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--pred_horizon', type=int, default=64)
     parser.add_argument('--gradient_accumulation_steps', type=int, default=2)

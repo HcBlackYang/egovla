@@ -459,7 +459,7 @@ class RobotDataset(Dataset):
                  history_len=500,       # 模拟的历史视野长度 (从中采样 window_size 帧)
                  pred_horizon=64,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/124dataset_stats.json"): 
+                 stats_path="/yanghaochuan/data/130dataset_stats.json"): 
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
