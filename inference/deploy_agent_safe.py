@@ -1,314 +1,3 @@
-# import torch
-# import cv2
-# import json
-# import numpy as np
-# from collections import deque
-# from diffusers import DDIMScheduler
-# import os
-# from torch.amp import autocast
-# from peft import LoraConfig, get_peft_model
-# from transformers import T5Tokenizer
-# import torch._dynamo
-# from torchvision import transforms
-
-# # === 导入你的模型 ===
-# from model.fusion_encoder import FusionEncoder
-# from model.rdt_model import RDTWrapper
-
-# # === 基础路径配置 ===
-# VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
-# RDT_PATH = '/yanghaochuan/models/rdt-1b'
-# STATS_PATH = "/yanghaochuan/data/115dataset_stats.json" 
-# TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
-# STAGE_C_PATH = '/yanghaochuan/114checkpoints_finetune/StageC_ForeSight_step_10000.pt'
-
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# class SafetyController:
-#     def __init__(self):
-#         self.joint_limits_min = np.array([-2.89, -1.76, -2.89, -3.07, -2.89, -0.01, -2.89]) + 0.01
-#         self.joint_limits_max = np.array([ 2.89,  1.76,  2.89, -0.06,  2.89,  3.75,  2.89]) - 0.01
-
-#     def clip_actions(self, actions_batch):
-#         actions_np = np.array(actions_batch)
-#         joints = actions_np[:, :7]
-#         gripper = actions_np[:, 7:]
-#         joints_clipped = np.clip(joints, self.joint_limits_min, self.joint_limits_max)
-#         return np.concatenate([joints_clipped, gripper], axis=1)
-
-# class RealTimeAgent:
-#     def __init__(self):
-#         self.device = DEVICE
-#         self.safety = SafetyController() 
-#         self.pred_horizon = 64
-#         self.history_len = 500       
-#         self.model_input_frames = 6 
-        
-#         import time
-#         import os
-#         # 定义保存目录
-#         self.debug_dir = f"debug_visuals_{int(time.time())}"
-#         os.makedirs(self.debug_dir, exist_ok=True)
-#         self.step_counter = 0
-
-#         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
-#         try:
-#             self.tokenizer = T5Tokenizer.from_pretrained(TOKENIZER_PATH, local_files_only=True)
-#         except:
-#             self.tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-large")
-        
-#         # 加载统计数据
-#         if not os.path.exists(STATS_PATH):
-#             raise FileNotFoundError(f"❌ 找不到统计文件: {STATS_PATH}")
-#         with open(STATS_PATH, 'r') as f:
-#             stats = json.load(f)
-        
-#         mean_raw = np.array(stats['action_mean'], dtype=np.float32)
-#         std_raw = np.array(stats['action_std'], dtype=np.float32)
-        
-#         if mean_raw.shape[0] > 8:
-#             self.action_mean = mean_raw[:8]
-#             self.action_std = std_raw[:8]
-#         elif mean_raw.shape[0] == 7:
-#             self.action_mean = np.concatenate([mean_raw, [0.0]])
-#             self.action_std = np.concatenate([std_raw, [1.0]])
-#         else:
-#             self.action_mean = mean_raw
-#             self.action_std = std_raw
-            
-#         self.action_std = np.maximum(self.action_std, 1e-2)
-
-#         print(f"📊 [Stats Loaded] Mean[0]: {self.action_mean[0]:.3f}, GripperMean: {self.action_mean[7]:.3f}")
-#         print(f"📊 [Stats Loaded] Std[0]:  {self.action_std[0]:.3f}, GripperStd:  {self.action_std[7]:.3f}")
-
-#         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-#                                               std=[0.229, 0.224, 0.225])
-#         self._init_models()
-#         self._init_scheduler()
-        
-#         self.video_buffer = deque(maxlen=self.history_len)
-#         self.state_buffer = deque(maxlen=self.history_len)
-#         self.first_frame_tensor = None
-#         self.text_tokens = None 
-#         self.default_prompt = "pick up the orange ball and put it on the plank"
-        
-#         # 🟢 [诊断] 关闭 torch.compile 以排除编译错误干扰
-#         # torch._dynamo.config.suppress_errors = True
-#         # try: self.encoder = torch.compile(self.encoder, mode="default")
-#         # except: pass
-#         self.warmup()
-
-#     def _init_models(self):
-#         print(f"[Agent] Initializing models on {self.device}...")
-#         self.encoder = FusionEncoder(backbone_path=VIDEO_MAE_PATH, teacher_dim=1152).to(self.device).eval()
-#         self.policy = RDTWrapper(action_dim=8, model_path=RDT_PATH, rdt_cond_dim=768, pred_horizon=64).to(self.device).eval()
-        
-#         print(f"[Agent] Loading Checkpoint: {STAGE_C_PATH}")
-#         ckpt_c = torch.load(STAGE_C_PATH, map_location=self.device)
-        
-#         peft_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "linear"], lora_dropout=0.05, bias="none")
-#         self.policy.rdt_model = get_peft_model(self.policy.rdt_model, peft_config)
-        
-#         if 'rdt_state_dict' in ckpt_c: self.policy.load_state_dict(ckpt_c['rdt_state_dict'], strict=False)
-#         else: self.policy.load_state_dict(ckpt_c, strict=False)
-        
-#         if 'encoder_state_dict' in ckpt_c: self.encoder.load_state_dict(ckpt_c['encoder_state_dict'], strict=False)
-
-#     def _init_scheduler(self):
-#         self.scheduler = DDIMScheduler(num_train_timesteps=1000, beta_schedule="squaredcos_cap_v2", prediction_type="epsilon", clip_sample=True)
-#         self.inference_steps = 25
-#         self.scheduler.set_timesteps(self.inference_steps)
-
-#     def warmup(self):
-#         print("🔥 [System] Warming up model...")
-#         dummy_video = torch.randn(1, 2, 3, 6, 224, 224, device=self.device, dtype=torch.bfloat16)
-#         dummy_text = torch.randint(0, 1000, (1, 16), device=self.device)
-#         dummy_state = torch.randn(1, 1, 8, device=self.device, dtype=torch.float32)
-#         dummy_ff = torch.randn(1, 2, 3, 224, 224, device=self.device, dtype=torch.float32)
-#         try:
-#             with autocast('cuda', dtype=torch.bfloat16):
-#                 feats = self.encoder(dummy_video, dummy_text, dummy_state, dummy_ff)
-#                 feats["state"] = dummy_state[:, -1, :]
-#                 latents = torch.randn(1, self.pred_horizon, 8, device=self.device)
-#                 t = torch.tensor([0], device=self.device)
-#                 _ = self.policy(latents, t, feats)
-#             print("✅ Warmup done.")
-#         except Exception as e:
-#             print(f"❌ Warmup failed: {e}")
-
-#     def preprocess_image(self, img_np):
-#         resized = cv2.resize(img_np, (224, 224))
-#         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-#         tensor = torch.tensor(rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
-#         tensor = self.normalize(tensor) 
-#         return tensor
-
-#     def save_debug_image(self, tensor, name="debug.png"):
-#         try:
-#             t = tensor.detach().cpu().clone()
-#             # Un-Normalize: x * std + mean
-#             mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-#             std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-#             t = t * std + mean
-#             t = torch.clamp(t, 0, 1)
-#             img_np = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-#             img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-#             cv2.imwrite(name, img_bgr)
-#             # print(f"📸 [Debug] Saved model input view to {name}")
-#         except Exception as e:
-#             pass
-
-#     # 🟢 [新增] 这是一个专门把 Tensor 还原成图片的函数
-#     def save_model_input_visuals(self, vid_tensor, step_idx):
-#         """
-#         将模型输入的 6 帧 Tensor 反归一化并拼图保存
-#         vid_tensor shape: [1, 2, 3, 6, 224, 224] (Batch, View, Channel, Time, H, W)
-#         """
-#         try:
-#             # 取出 wrist 视角 (View Index 1), 去掉 Batch 维 -> [3, 6, 224, 224]
-#             # 注意：你的代码里 Main 是 0 (全黑), Wrist 是 1
-#             wrist_t = vid_tensor[0, 1] 
-            
-#             # 反归一化参数 (ImageNet)
-#             mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1, 1).to(wrist_t.device)
-#             std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1, 1).to(wrist_t.device)
-            
-#             # 反归一化: x * std + mean
-#             wrist_t = wrist_t * std + mean
-#             wrist_t = torch.clamp(wrist_t, 0, 1)
-            
-#             # 转为 Numpy: [3, 6, 224, 224] -> [6, 224, 224, 3]
-#             imgs = wrist_t.permute(1, 2, 3, 0).detach().cpu().numpy()
-#             imgs = (imgs * 255).astype(np.uint8)
-            
-#             # 拼接 6 帧成一行长图
-#             # imgs[0] 是 Buffer 里最早的一帧，imgs[-1] 是最新的一帧
-#             concat_img = np.hstack([imgs[i] for i in range(6)])
-            
-#             # 转为 BGR 供 cv2 保存
-#             concat_img = cv2.cvtColor(concat_img, cv2.COLOR_RGB2BGR)
-            
-#             # 保存
-#             save_path = os.path.join(self.debug_dir, f"step_{step_idx:04d}_buffer.jpg")
-#             cv2.imwrite(save_path, concat_img)
-#             # print(f"📸 Saved buffer visual to {save_path}") # 刷屏可注释掉
-            
-#         except Exception as e:
-#             print(f"⚠️ Visualization Failed: {e}")
-
-#     def reset_session(self, first_frame_img, current_qpos=None):
-#         print("[Agent] Resetting session (Cold Start)...")
-#         self.video_buffer.clear()
-#         self.state_buffer.clear()
-        
-#         # === 🟢 [Double Check] 处理首帧 ===
-#         wrist_tensor = self.preprocess_image(first_frame_img)
-#         main_fake = torch.zeros_like(wrist_tensor)
-#         self.first_frame_tensor = torch.stack([main_fake, wrist_tensor], dim=0).unsqueeze(0).to(self.device)
-#         self.save_debug_image(wrist_tensor, "debug_first_frame_wrist.png")
-        
-#         tokens = self.tokenizer(self.default_prompt, return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids
-#         self.text_tokens = tokens.to(self.device)
-        
-#         video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0)
-#         self.video_buffer.append(video_frame_unit)
-            
-#         if current_qpos is None: current_qpos = np.zeros(8)
-#         else: 
-#             if len(current_qpos) == 7: current_qpos = list(current_qpos) + [0.0]
-#             current_qpos = np.array(current_qpos, dtype=np.float32)
-            
-#         # 🔍 打印初始状态
-#         print(f"   🚩 [Reset QPos] {current_qpos[:6]} ... Grip: {current_qpos[7]}")
-        
-#         norm_qpos = (current_qpos - self.action_mean) / self.action_std
-#         self.state_buffer.append(norm_qpos)
-
-#     @torch.no_grad()
-#     def step(self, frames_list, current_qpos):
-#         # 1. 更新 Video
-#         for frame in frames_list:
-#             wrist_tensor = self.preprocess_image(frame)
-#             main_fake = torch.zeros_like(wrist_tensor)
-#             combined_frame = torch.stack([main_fake, wrist_tensor], dim=0)
-#             self.video_buffer.append(combined_frame) 
-        
-#         # 2. 更新 State
-#         if len(current_qpos) == 7: current_qpos = list(current_qpos) + [0.0]
-#         qpos_np = np.array(current_qpos, dtype=np.float32)
-        
-#         # 🟢 [核心诊断] 计算 Normalized State
-#         norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
-#         self.state_buffer.append(norm_qpos_np)
-        
-#         # =================================================================
-#         # 🚨 [关键监控] 如果这里的数值 > 3.0 或 < -3.0，说明状态输入错了！
-#         # =================================================================
-#         gripper_norm = norm_qpos_np[7]
-#         joint0_norm = norm_qpos_np[0]
-#         if abs(gripper_norm) > 3.0 or abs(joint0_norm) > 3.0:
-#              print(f"\n⚠️ STATE OOD! J0_Norm: {joint0_norm:.2f}, Grip_Norm: {gripper_norm:.2f} | Raw Grip: {qpos_np[7]:.4f}")
-        
-#         # 3. 采样
-#         curr_len = len(self.video_buffer)
-#         indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
-#         selected_frames = [self.video_buffer[i] for i in indices]
-        
-#         vid_t = torch.stack(selected_frames).to(self.device)
-#         vid_t = vid_t.permute(1, 2, 0, 3, 4).unsqueeze(0)
-
-#         # =========================================================
-#         # 🟢 [插入] 在这里保存模型看到的画面！
-#         # =========================================================
-#         self.save_model_input_visuals(vid_t, self.step_counter)
-#         self.step_counter += 1
-
-#         # State: 取当前 state
-#         state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
-        
-#         # 4. Inference
-#         self.scheduler.set_timesteps(self.inference_steps)
-#         with autocast('cuda', dtype=torch.bfloat16):
-#             features = self.encoder(vid_t, self.text_tokens, state_t, self.first_frame_tensor)
-#             features["state"] = state_t[:, -1, :] 
-#             latents = torch.randn(1, self.pred_horizon, 8, device=self.device) 
-            
-#             for t in self.scheduler.timesteps:
-#                 model_input = self.scheduler.scale_model_input(latents, t)
-#                 t_tensor = torch.tensor([t], device=self.device)
-#                 noise_pred = self.policy(model_input, t_tensor, features)
-#                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-            
-#         normalized_actions = latents[0].float()
-#         # === 🟢 [新增] 诊断代码 ===
-#         # 计算当前预测动作的“平均绝对值”
-#         mean_abs_val = torch.mean(torch.abs(normalized_actions)).item()
-        
-#         # 打印第一步的归一化数值 (看它是不是全是 0.x)
-#         first_step_norm = normalized_actions[0].detach().cpu().numpy()
-#         print(f"\n🔍 [Diagnosis] Normalized Mean Abs: {mean_abs_val:.4f}")
-#         print(f"   First Step Norm: {np.round(first_step_norm, 3)}")
-#         # =========================
-#         action_pred_np = normalized_actions.detach().cpu().numpy()
-#         denormalized_actions = action_pred_np * self.action_std + self.action_mean
-        
-#         # 夹爪二值化
-#         GRIPPER_OPEN_VAL = 0.0804  
-#         GRIPPER_CLOSE_VAL = 0.0428 
-#         GRIPPER_THRESHOLD = 0.0616 
-
-#         raw_gripper_pred = denormalized_actions[:, 7]
-#         binary_gripper = np.where(raw_gripper_pred > GRIPPER_THRESHOLD, GRIPPER_OPEN_VAL, GRIPPER_CLOSE_VAL)
-#         denormalized_actions[:, 7] = binary_gripper
-        
-#         print(f"   >>> [Step] NormState J0: {joint0_norm:.2f} G: {gripper_norm:.2f} | Pred J0: {denormalized_actions[0,0]:.3f}", end='\r')
-        
-#         safe_actions = self.safety.clip_actions(denormalized_actions)
-#         return safe_actions.tolist()
-
-
-
-
 # # ego单视角
 # import torch
 # import cv2
@@ -675,7 +364,198 @@
 
 
 
-# ego纯数值 - 修复版
+# # ego纯数值
+# import torch
+# import cv2
+# import json
+# import numpy as np
+# from collections import deque
+# from diffusers import DDIMScheduler
+# import os
+# from torch.amp import autocast
+# from peft import LoraConfig, get_peft_model
+# from transformers import T5Tokenizer
+# from torchvision import transforms
+# import time
+
+# # 导入模型组件
+# from model.fusion_encoder import FusionEncoder
+# from model.rdt_model import RDTWrapper
+
+# # 配置路径
+# VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
+# RDT_PATH = '/yanghaochuan/models/rdt-1b'
+# STATS_PATH = "/yanghaochuan/data/124dataset_stats.json" 
+# TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
+# STAGE_C_PATH = '/yanghaochuan/124checkpoints_finetune/StageC_ForeSight_step_7000.pt'
+
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# class SafetyController:
+#     def __init__(self):
+#         # 关节限位保护
+#         self.joint_limits_min = np.array([-2.89, -1.76, -2.89, -3.07, -2.89, -0.01, -2.89]) + 0.01
+#         self.joint_limits_max = np.array([ 2.89,  1.76,  2.89, -0.06,  2.89,  3.75,  2.89]) - 0.01
+
+#     def clip_actions(self, actions_batch):
+#         actions_np = np.array(actions_batch)
+#         joints = actions_np[:, :7]
+#         gripper = actions_np[:, 7:]
+#         joints_clipped = np.clip(joints, self.joint_limits_min, self.joint_limits_max)
+#         return np.concatenate([joints_clipped, gripper], axis=1)
+
+# class RealTimeAgent:
+#     def __init__(self):
+#         self.device = DEVICE
+#         self.safety = SafetyController() 
+#         self.pred_horizon = 64
+#         self.history_len = 500       
+#         self.model_input_frames = 6  
+        
+#         # 1. 加载 Tokenizer 并预初始化 text_tokens
+#         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
+#         self.tokenizer = T5Tokenizer.from_pretrained(TOKENIZER_PATH, local_files_only=True)
+#         self.default_prompt = "pick up the orange ball and put it on the plank"
+        
+#         # 🟢 修复 ValueError: 确保在初始化时就生成 text_tokens
+#         self.text_tokens = self.tokenizer(
+#             self.default_prompt, 
+#             return_tensors="pt", 
+#             padding="max_length", 
+#             max_length=16, 
+#             truncation=True
+#         ).input_ids.to(self.device)
+
+#         # 2. 归一化参数加载
+#         if not os.path.exists(STATS_PATH):
+#             raise FileNotFoundError(f"❌ 找不到统计文件: {STATS_PATH}")
+#         with open(STATS_PATH, 'r') as f:
+#             stats = json.load(f)
+#         self.action_mean = np.array(stats['action_mean'][:8], dtype=np.float32)
+#         self.action_std = np.maximum(np.array(stats['action_std'][:8], dtype=np.float32), 1e-2)
+
+#         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+#         # 3. 初始化模型结构
+#         self._init_models()
+#         self._init_scheduler()
+        
+#         self.video_buffer = deque(maxlen=self.history_len)
+#         self.state_buffer = deque(maxlen=self.history_len)
+#         self.first_frame_tensor = None
+        
+#         # 4. 执行预热
+#         self.warmup()
+
+#     def _init_models(self):
+#         print(f"[Agent] Initializing models on {self.device}...")
+#         self.encoder = FusionEncoder(backbone_path=VIDEO_MAE_PATH, teacher_dim=1152).to(self.device).eval()
+#         self.policy = RDTWrapper(action_dim=8, model_path=RDT_PATH, rdt_cond_dim=768, pred_horizon=64).to(self.device).eval()
+        
+#         print(f"[Agent] Loading Checkpoint: {STAGE_C_PATH}")
+#         ckpt_c = torch.load(STAGE_C_PATH, map_location=self.device)
+        
+#         # LoRA 配置
+#         peft_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2", "linear"], lora_dropout=0.05, bias="none")
+#         self.policy.rdt_model = get_peft_model(self.policy.rdt_model, peft_config)
+        
+#         if 'rdt_state_dict' in ckpt_c: self.policy.load_state_dict(ckpt_c['rdt_state_dict'], strict=False)
+#         else: self.policy.load_state_dict(ckpt_c, strict=False)
+        
+#         if 'encoder_state_dict' in ckpt_c: self.encoder.load_state_dict(ckpt_c['encoder_state_dict'], strict=False)
+
+#     def _init_scheduler(self):
+#         self.scheduler = DDIMScheduler(num_train_timesteps=1000, beta_schedule="squaredcos_cap_v2", prediction_type="epsilon", clip_sample=True)
+#         self.scheduler.set_timesteps(25)
+
+#     def warmup(self):
+#         """🟢 修复 AttributeError: 确保类定义内包含此方法"""
+#         print("🔥 [System] Warming up model...")
+#         dummy_video = torch.randn(1, 2, 3, 6, 224, 224, device=self.device, dtype=torch.bfloat16)
+#         dummy_state = torch.randn(1, 1, 8, device=self.device, dtype=torch.float32)
+#         dummy_ff = torch.randn(1, 2, 3, 224, 224, device=self.device, dtype=torch.float32)
+#         try:
+#             with autocast('cuda', dtype=torch.bfloat16):
+#                 # 使用已经初始化好的 self.text_tokens
+#                 feats = self.encoder(dummy_video, self.text_tokens, dummy_state, dummy_ff)
+#                 feats["state"] = dummy_state[:, -1, :]
+#                 latents = torch.randn(1, self.pred_horizon, 8, device=self.device)
+#                 t_tensor = torch.tensor([0], device=self.device)
+#                 _ = self.policy(latents, t_tensor, feats)
+#             print("✅ Warmup done.")
+#         except Exception as e:
+#             print(f"❌ Warmup failed: {e}")
+
+#     def preprocess_image(self, img_np):
+#         resized = cv2.resize(img_np, (224, 224))
+#         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+#         tensor = torch.tensor(rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
+#         return self.normalize(tensor)
+
+#     def reset_session(self, first_frame_img, current_qpos=None):
+#         print("[Agent] Resetting session...")
+#         self.video_buffer.clear()
+#         self.state_buffer.clear()
+        
+#         wrist_tensor = self.preprocess_image(first_frame_img)
+#         main_fake = torch.zeros_like(wrist_tensor)
+#         self.first_frame_tensor = torch.stack([main_fake, wrist_tensor], dim=0).unsqueeze(0).to(self.device)
+        
+#         # 更新 text_tokens（如果 prompt 改变）
+#         self.text_tokens = self.tokenizer(self.default_prompt, return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids.to(self.device)
+        
+#         video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0)
+#         self.video_buffer.append(video_frame_unit)
+        
+#         if current_qpos is None: current_qpos = np.zeros(8)
+#         norm_qpos = (np.array(current_qpos[:8]) - self.action_mean) / self.action_std
+#         self.state_buffer.append(norm_qpos)
+
+#     @torch.no_grad()
+#     def step(self, frames_list, current_qpos):
+#         # 1. 更新 Buffer
+#         for frame in frames_list:
+#             wrist_t = self.preprocess_image(frame)
+#             self.video_buffer.append(torch.stack([torch.zeros_like(wrist_t), wrist_t], dim=0)) 
+        
+#         qpos_np = np.array(current_qpos[:8], dtype=np.float32)
+#         norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
+#         self.state_buffer.append(norm_qpos_np)
+        
+#         # 2. 采样输入
+#         curr_len = len(self.video_buffer)
+#         indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
+#         vid_t = torch.stack([self.video_buffer[i] for i in indices]).to(self.device).permute(1, 2, 0, 3, 4).unsqueeze(0)
+#         state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).view(1, 1, 8).to(self.device)
+        
+#         # 3. 推理
+#         with autocast('cuda', dtype=torch.bfloat16):
+#             # 🟢 此时 self.text_tokens 已在 __init__ 确保非空
+#             features = self.encoder(vid_t, self.text_tokens, state_t, self.first_frame_tensor)
+#             features["state"] = state_t[:, -1, :] 
+#             latents = torch.randn(1, self.pred_horizon, 8, device=self.device) 
+            
+#             for t in self.scheduler.timesteps:
+#                 model_input = self.scheduler.scale_model_input(latents, t)
+#                 t_tensor = torch.tensor([t], device=self.device)
+#                 noise_pred = self.policy(model_input, t_tensor, features)
+#                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+            
+#         # 4. 反归一化
+#         action_pred_np = latents[0].float().cpu().numpy()
+#         denormalized_actions = action_pred_np * self.action_std + self.action_mean
+        
+#         # 夹爪二值化
+#         GRIPPER_THRESHOLD = 0.0616
+#         denormalized_actions[:, 7] = np.where(denormalized_actions[:, 7] > GRIPPER_THRESHOLD, 0.0804, 0.0428)
+        
+#         # 安全裁剪并返回
+#         return self.safety.clip_actions(denormalized_actions).tolist()
+
+
+
+
+#ego 二值化
 import torch
 import cv2
 import json
@@ -696,9 +576,9 @@ from model.rdt_model import RDTWrapper
 # 配置路径
 VIDEO_MAE_PATH = '/yanghaochuan/models/VideoMAEv2-Large'
 RDT_PATH = '/yanghaochuan/models/rdt-1b'
-STATS_PATH = "/yanghaochuan/data/124dataset_stats.json" 
+STATS_PATH = "/yanghaochuan/data/131dataset_stats.json" 
 TOKENIZER_PATH = "/yanghaochuan/models/flan-t5-large"
-STAGE_C_PATH = '/yanghaochuan/124checkpoints_finetune/StageC_ForeSight_step_7000.pt'
+STAGE_C_PATH = '/yanghaochuan/131checkpoints_finetune/StageC_ForeSight_step_10000.pt'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -723,12 +603,19 @@ class RealTimeAgent:
         self.history_len = 500       
         self.model_input_frames = 6  
         
+        # 🟢 [新增] 定义用于输入转换的物理阈值
+        # 这是物理世界中判断开闭的界限 (根据你的 stats 文件)
+        self.PHYSICAL_GRIPPER_THRESHOLD = 0.0616 
+
         # 1. 加载 Tokenizer 并预初始化 text_tokens
         print(f"[Agent] Loading Tokenizer from {TOKENIZER_PATH}...")
-        self.tokenizer = T5Tokenizer.from_pretrained(TOKENIZER_PATH, local_files_only=True)
+        try:
+            self.tokenizer = T5Tokenizer.from_pretrained(TOKENIZER_PATH, local_files_only=True)
+        except:
+            self.tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-large")
+            
         self.default_prompt = "pick up the orange ball and put it on the plank"
         
-        # 🟢 修复 ValueError: 确保在初始化时就生成 text_tokens
         self.text_tokens = self.tokenizer(
             self.default_prompt, 
             return_tensors="pt", 
@@ -780,14 +667,12 @@ class RealTimeAgent:
         self.scheduler.set_timesteps(25)
 
     def warmup(self):
-        """🟢 修复 AttributeError: 确保类定义内包含此方法"""
         print("🔥 [System] Warming up model...")
         dummy_video = torch.randn(1, 2, 3, 6, 224, 224, device=self.device, dtype=torch.bfloat16)
         dummy_state = torch.randn(1, 1, 8, device=self.device, dtype=torch.float32)
         dummy_ff = torch.randn(1, 2, 3, 224, 224, device=self.device, dtype=torch.float32)
         try:
             with autocast('cuda', dtype=torch.bfloat16):
-                # 使用已经初始化好的 self.text_tokens
                 feats = self.encoder(dummy_video, self.text_tokens, dummy_state, dummy_ff)
                 feats["state"] = dummy_state[:, -1, :]
                 latents = torch.randn(1, self.pred_horizon, 8, device=self.device)
@@ -803,45 +688,79 @@ class RealTimeAgent:
         tensor = torch.tensor(rgb, dtype=torch.float32).permute(2, 0, 1) / 255.0
         return self.normalize(tensor)
 
+    # 🟢 [新增] 辅助函数：处理输入的物理状态
+    def _preprocess_qpos_for_model(self, current_qpos):
+        """
+        将机器人的物理状态转换为模型理解的状态。
+        特别是将夹爪的物理数值 (0.04~0.08) 转换为训练时的二值 (1.0/-1.0)
+        """
+        if current_qpos is None: 
+            qpos_new = np.zeros(8, dtype=np.float32)
+        else:
+            qpos_new = np.array(current_qpos, dtype=np.float32).copy()
+            # 补齐维度
+            if len(qpos_new) == 7: 
+                qpos_new = np.concatenate([qpos_new, [0.0]])
+            elif len(qpos_new) > 8:
+                 qpos_new = qpos_new[:8]
+        
+        # === 关键转换 ===
+        # 如果物理值 > 0.0616，模型应该看到 1.0 (Open)
+        # 如果物理值 < 0.0616，模型应该看到 -1.0 (Close)
+        raw_gripper = qpos_new[7]
+        if raw_gripper > self.PHYSICAL_GRIPPER_THRESHOLD:
+            qpos_new[7] = 1.0
+        else:
+            qpos_new[7] = -1.0
+            
+        return qpos_new
+
     def reset_session(self, first_frame_img, current_qpos=None):
         print("[Agent] Resetting session...")
         self.video_buffer.clear()
         self.state_buffer.clear()
         
+        # 1. 图像处理
         wrist_tensor = self.preprocess_image(first_frame_img)
         main_fake = torch.zeros_like(wrist_tensor)
         self.first_frame_tensor = torch.stack([main_fake, wrist_tensor], dim=0).unsqueeze(0).to(self.device)
         
-        # 更新 text_tokens（如果 prompt 改变）
+        # 更新 text_tokens
         self.text_tokens = self.tokenizer(self.default_prompt, return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids.to(self.device)
         
         video_frame_unit = torch.stack([main_fake, wrist_tensor], dim=0)
         self.video_buffer.append(video_frame_unit)
         
-        if current_qpos is None: current_qpos = np.zeros(8)
-        norm_qpos = (np.array(current_qpos[:8]) - self.action_mean) / self.action_std
+        # 2. 状态处理 [修改点]
+        # 先将物理状态转为二值化状态，再进行归一化
+        model_input_qpos = self._preprocess_qpos_for_model(current_qpos)
+        
+        print(f"   🚩 [Input Check] Raw Grip: {current_qpos[7] if current_qpos is not None else 0:.4f} -> Model Input: {model_input_qpos[7]:.1f}")
+        
+        norm_qpos = (model_input_qpos - self.action_mean) / self.action_std
         self.state_buffer.append(norm_qpos)
 
     @torch.no_grad()
     def step(self, frames_list, current_qpos):
-        # 1. 更新 Buffer
+        # 1. 更新图像 Buffer
         for frame in frames_list:
             wrist_t = self.preprocess_image(frame)
             self.video_buffer.append(torch.stack([torch.zeros_like(wrist_t), wrist_t], dim=0)) 
         
-        qpos_np = np.array(current_qpos[:8], dtype=np.float32)
-        norm_qpos_np = (qpos_np - self.action_mean) / self.action_std
+        # 2. 更新状态 Buffer [修改点]
+        # 同样，必须先二值化，再归一化
+        model_input_qpos = self._preprocess_qpos_for_model(current_qpos)
+        norm_qpos_np = (model_input_qpos - self.action_mean) / self.action_std
         self.state_buffer.append(norm_qpos_np)
         
-        # 2. 采样输入
+        # 3. 采样输入
         curr_len = len(self.video_buffer)
         indices = np.linspace(0, curr_len - 1, self.model_input_frames).astype(int)
         vid_t = torch.stack([self.video_buffer[i] for i in indices]).to(self.device).permute(1, 2, 0, 3, 4).unsqueeze(0)
         state_t = torch.tensor(norm_qpos_np, dtype=torch.float32).view(1, 1, 8).to(self.device)
         
-        # 3. 推理
+        # 4. 推理
         with autocast('cuda', dtype=torch.bfloat16):
-            # 🟢 此时 self.text_tokens 已在 __init__ 确保非空
             features = self.encoder(vid_t, self.text_tokens, state_t, self.first_frame_tensor)
             features["state"] = state_t[:, -1, :] 
             latents = torch.randn(1, self.pred_horizon, 8, device=self.device) 
@@ -852,13 +771,16 @@ class RealTimeAgent:
                 noise_pred = self.policy(model_input, t_tensor, features)
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
             
-        # 4. 反归一化
+        # 5. 反归一化
         action_pred_np = latents[0].float().cpu().numpy()
         denormalized_actions = action_pred_np * self.action_std + self.action_mean
         
-        # 夹爪二值化
-        GRIPPER_THRESHOLD = 0.0616
-        denormalized_actions[:, 7] = np.where(denormalized_actions[:, 7] > GRIPPER_THRESHOLD, 0.0804, 0.0428)
+        # === 🟢 [核心修改] 输出二值化逻辑 ===
+        # 模型预测值 > 0.0 -> 输出 1.0 (Open)
+        # 模型预测值 <= 0.0 -> 输出 -1.0 (Close)
+        # 这样客户端接收到明确的信号，不会收到 0.3 这种中间值
+        raw_gripper_pred = denormalized_actions[:, 7]
+        denormalized_actions[:, 7] = np.where(raw_gripper_pred > 0.0, 1.0, -1.0)
         
         # 安全裁剪并返回
         return self.safety.clip_actions(denormalized_actions).tolist()

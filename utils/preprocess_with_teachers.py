@@ -233,8 +233,8 @@ def read_json_state(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--raw_dir', type=str, default='/yanghaochuan/data/pick_up_the_orange_ball_and_put_it_on_the_plank', help='原始数据目录')
-    parser.add_argument('--out_path', type=str, default='/yanghaochuan/data/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
+    parser.add_argument('--raw_dir', type=str, default='/yanghaochuan/data/131', help='原始数据目录')
+    parser.add_argument('--out_path', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_40.hdf5')
     parser.add_argument('--siglip_path', type=str, default='/yanghaochuan/models/siglip-so400m-patch14-384')
     
     args = parser.parse_args()

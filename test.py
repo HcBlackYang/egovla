@@ -73,3 +73,103 @@ if __name__ == "__main__":
     parser.add_argument('--path', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank.hdf5')
     args = parser.parse_args()
     analyze_stats(args.path)
+
+# import argparse
+# import sys
+# import os
+# import numpy as np
+# from tqdm import tqdm
+
+# # 确保能导入 utils
+# sys.path.append(os.getcwd())
+
+# from utils.dataset_loader import RobotDataset
+
+# def test_balance(args):
+#     print(f"🧪 Testing Dataset Balance Logic...")
+#     print(f"📂 Data Root: {args.data_root}")
+#     print(f"📊 Stats Path: {args.stats_path}")
+    
+#     # 强制使用 in_memory=False，这样初始化只需要读取 HDF5 结构，不需要加载所有图片进内存
+#     # 速度会快很多，且逻辑与训练时一致
+#     print("\n[Init] Initializing Dataset (Disk Mode for speed)...")
+#     dataset = RobotDataset(
+#         hdf5_path=args.data_root,
+#         stats_path=args.stats_path,
+#         in_memory=False,  # ⚡️ 快速模式
+#         window_size=6,
+#         pred_horizon=64
+#     )
+    
+#     print("\n" + "="*50)
+#     print("🧐 Analyzing Sample Distribution (Iterating Indices)...")
+#     print("="*50)
+    
+#     stats = {
+#         "Type A (Normal, 80 demos)": 0,
+#         "Type B (High, 20 demos)": 0,
+#         "Type C (New, 40 demos)": 0
+#     }
+    
+#     # 遍历 dataset.indices 进行计数
+#     # indices 里的每一个元素代表一个训练样本 (Window)
+#     for meta in tqdm(dataset.indices, desc="Counting"):
+#         demo_key = meta['demo_key']
+#         try:
+#             # 解析 ID: demo_123 -> 123
+#             idx = int(demo_key.split('_')[1])
+#         except:
+#             idx = 0
+            
+#         # 复用你的分类逻辑
+#         if idx < 100:
+#             if idx % 5 == 0:
+#                 stats["Type B (High, 20 demos)"] += 1
+#             else:
+#                 stats["Type A (Normal, 80 demos)"] += 1
+#         else:
+#             stats["Type C (New, 40 demos)"] += 1
+            
+#     total = len(dataset)
+    
+#     print(f"\n📊 Final Sample Counts (Effective Training Samples):")
+#     for k, v in stats.items():
+#         ratio = (v / total) * 100
+#         print(f"   🔹 {k:<25}: {v} samples ({ratio:.2f}%)")
+        
+#     print(f"\n📦 Total Samples: {total}")
+    
+#     # 验证比例
+#     count_a = stats["Type A (Normal, 80 demos)"]
+#     count_b = stats["Type B (High, 20 demos)"]
+#     count_c = stats["Type C (New, 40 demos)"]
+    
+#     # 防止除零
+#     base = count_a if count_a > 0 else 1
+    
+#     print("\n⚖️  Ratio Check (Normalized to Type A):")
+#     print(f"   Target  => 1.00 : 1.00 : 1.00")
+#     print(f"   Actual  => {count_a/base:.2f} : {count_b/base:.2f} : {count_c/base:.2f}")
+
+#     if 0.95 < count_b/base < 1.05 and 0.95 < count_c/base < 1.05:
+#         print("\n✅ PERFECT BALANCE CONFIRMED!")
+#     else:
+#         print("\n⚠️  Balance deviates slightly (likely due to varying demo lengths).")
+
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--data_root', type=str, required=True, help='HDF5 文件路径')
+#     # 这里的 stats_path 只是为了让 Dataset 初始化不报错，不需要真实准确的统计值
+#     parser.add_argument('--stats_path', type=str, default='/yanghaochuan/data/131dataset_stats.json')
+#     args = parser.parse_args()
+    
+#     # 检查文件是否存在
+#     if not os.path.exists(args.data_root):
+#         print(f"❌ Error: Data file not found at {args.data_root}")
+#         sys.exit(1)
+        
+#     # 如果 stats 不存在，警告一下但尝试继续（如果 dataset_loader 没有强校验的话）
+#     if not os.path.exists(args.stats_path):
+#         print(f"⚠️  Warning: Stats file not found at {args.stats_path}. Ensure Dataset class handles this or provide a valid path.")
+
+#     test_balance(args)

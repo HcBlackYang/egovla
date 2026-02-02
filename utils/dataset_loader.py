@@ -442,7 +442,373 @@
 #             "future_exo_target": future_exo_target # [6, 1152] (Sparse Future)
 #         }
 
-# utils/dataset_loader.py
+# # utils/dataset_loader.py
+# import torch
+# from torch.utils.data import Dataset
+# import h5py
+# import numpy as np
+# import os
+# import json
+# from transformers import T5Tokenizer
+# from torchvision import transforms
+# from tqdm import tqdm
+
+# class RobotDataset(Dataset):
+#     def __init__(self, hdf5_path, in_memory=True, 
+#                  window_size=6,         # 实际输入给模型的帧数
+#                  history_len=500,       # 模拟的历史视野长度 (从中采样 window_size 帧)
+#                  pred_horizon=64,
+#                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
+#                  stats_path="/yanghaochuan/data/130dataset_stats.json"): 
+        
+#         self.hdf5_path = hdf5_path
+#         self.window_size = window_size
+#         self.history_len = history_len
+#         self.pred_horizon = pred_horizon
+#         self.in_memory = in_memory
+        
+#         # 🟢 定义稀疏预测步长 (World Model Anchors)
+#         self.future_offsets = [0, 2, 4, 8, 16, 32]
+
+#         # === 定义归一化 (VideoMAE 标准) ===
+#         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+#                                               std=[0.229, 0.224, 0.225])
+
+#         # === 1. 加载 Tokenizer ===
+#         print(f"[Dataset] Loading Tokenizer from {tokenizer_path}...")
+#         try:
+#             self.tokenizer = T5Tokenizer.from_pretrained(tokenizer_path, local_files_only=True)
+#         except:
+#             print("[Dataset] Local tokenizer failed, trying default...")
+#             self.tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-large")
+        
+#         # === 2. 加载统计量 ===
+#         if not os.path.exists(stats_path):
+#              raise FileNotFoundError(f"❌ 找不到统计文件: {stats_path}")
+        
+#         with open(stats_path, 'r') as f:
+#             stats = json.load(f)
+        
+#         self.action_mean = torch.tensor(stats['action_mean']).float()
+#         self.action_std = torch.tensor(stats['action_std']).float()
+#         self.action_std = torch.maximum(self.action_std, torch.tensor(1e-2))
+        
+#         # === 3. 扫描数据结构 & Anchor ===
+#         self.indices = []
+#         self.anchor_bank = {}
+#         self.cache = {} # 内存缓存
+
+#         print(f"[Dataset] Scanning HDF5 structure...")
+#         with h5py.File(hdf5_path, 'r') as f:
+#             if 'data' not in f: raise ValueError(f"HDF5结构错误")
+#             self.demos = list(f['data'].keys())
+            
+#             # --- 3.1 收集 Anchors (Type B) ---
+#             for demo_key in self.demos:
+#                 demo_grp = f['data'][demo_key]
+#                 # 兼容旧数据的 Type B 判定
+#                 data_type = demo_grp.attrs.get("data_type", None)
+#                 if data_type is None: 
+#                     idx = int(demo_key.split('_')[1])
+#                     if idx % 5 == 0: data_type = "type_b"
+                
+#                 if data_type == "type_b":
+#                     main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
+#                     wrist_key = 'robot0_eye_in_hand_image'
+#                     if main_key in demo_grp['obs']:
+#                         m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
+#                         w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
+#                         # 存入 Anchor Bank (注意：这里暂未归一化，使用时再处理，或者在此处统一)
+#                         # 为了统一，我们在 __getitem__ 处统一做 Normalize
+#                         self.anchor_bank[demo_key] = torch.stack([m0, w0], dim=0)
+
+#             # --- 3.2 暴力预加载到内存 (IO Boost) ---
+#             if self.in_memory:
+#                 print(f"📥 [IO Boost] Loading ALL data to RAM (Total: {len(self.demos)} demos)...")
+#                 for demo_key in tqdm(self.demos):
+#                     grp = f['data'][demo_key]
+#                     cache_item = {}
+                    
+#                     # 自动识别 Main Camera Key
+#                     main_key = 'agentview_image' if 'agentview_image' in grp['obs'] else 'agentview_rgb'
+#                     wrist_key = 'robot0_eye_in_hand_image'
+
+#                     # 读取图像数据 (耗时操作)
+#                     cache_item['main_img'] = grp['obs'][main_key][:]
+#                     cache_item['wrist_img'] = grp['obs'][wrist_key][:]
+                    
+#                     # 读取状态与动作
+#                     cache_item['qpos'] = grp['obs']['robot0_joint_pos'][:]
+#                     # 如果有显式的 actions dataset 就读，没有则后续通过 qpos 切片
+#                     if 'actions' in grp:
+#                         cache_item['actions'] = grp['actions'][:]
+                    
+#                     # 读取 Teacher 特征
+#                     if 'teacher_siglip' in grp:
+#                         cache_item['teacher_siglip'] = grp['teacher_siglip'][:]
+#                     if 'teacher_exo' in grp:
+#                         cache_item['teacher_exo'] = grp['teacher_exo'][:]
+                    
+#                     self.cache[demo_key] = cache_item
+#                 print("✅ Dataset successfully loaded to RAM!")
+
+#             # --- 3.3 构建样本索引 ---
+#             for demo_key in self.demos:
+#                 # 如果在内存里，直接查缓存；否则查文件
+#                 if self.in_memory:
+#                     # 使用缓存中的长度信息
+#                     if 'actions' in self.cache[demo_key]:
+#                         total_len = self.cache[demo_key]['actions'].shape[0]
+#                     else:
+#                         total_len = self.cache[demo_key]['qpos'].shape[0] # Fallback
+#                 else:
+#                     demo_grp = f['data'][demo_key]
+#                     if 'actions' not in demo_grp: continue
+#                     total_len = demo_grp['actions'].shape[0]
+
+#                 # 只要剩余长度够预测未来即可
+#                 if total_len > self.pred_horizon:
+#                     # 获取指令 (指令通常很短，暂不缓存，每次读取开销可忽略，或者存入 meta)
+#                     # 为简单起见，这里还是每次读 attributes，或者如果你想极致优化，也可以缓存指令
+#                     if self.in_memory:
+#                         # HDF5 attributes 无法离线缓存，这里我们偷个懒，只缓存数据
+#                         # 实际运行时 Instruction 读取很快
+#                         pass 
+                    
+#                     # 为了获取 instruction，如果是 disk mode 必须读 file
+#                     # 如果是 memory mode，我们这里依然需要 file handle 来读 attrs
+#                     # 但 dataset scan 只跑一次，所以没关系
+#                     demo_grp = f['data'][demo_key]
+#                     instr = demo_grp.attrs.get('language_instruction', 'do nothing')
+#                     if isinstance(instr, bytes): instr = instr.decode('utf-8')
+                    
+#                     has_teacher = False
+#                     if self.in_memory:
+#                         has_teacher = 'teacher_siglip' in self.cache[demo_key]
+#                     else:
+#                         has_teacher = 'teacher_siglip' in demo_grp
+                    
+#                     # # 遍历每一个时间步
+#                     # for i in range(total_len - self.pred_horizon): 
+#                     #     self.indices.append({
+#                     #         'demo_key': demo_key, 
+#                     #         'current_t': i, 
+#                     #         'instruction': instr, 
+#                     #         'has_teacher': has_teacher
+#                     #     })
+#                     # 1. 判定当前 Demo 是否为 Type B (初始位置固定的数据)
+#                     # 假设你的命名规则是 demo_0, demo_5, demo_10... 是 Type B
+#                     curr_idx = int(demo_key.split('_')[1])
+#                     is_type_b = (curr_idx % 5 == 0) 
+
+#                     # 2. 设置重复次数
+#                     # Type B (20条) 重复 4 次 -> 等效 80 条
+#                     # Type A (80条) 重复 1 次 -> 等效 80 条
+#                     # 这样总比例接近 1:1
+#                     repeat_times = 4 if is_type_b else 1
+
+#                     for _ in range(repeat_times):  # <--- 🟢 新增循环：实现过采样
+#                         for i in range(total_len - self.pred_horizon): 
+#                             self.indices.append({
+#                                 'demo_key': demo_key, 
+#                                 'current_t': i, 
+#                                 'instruction': instr, 
+#                                 'has_teacher': has_teacher
+#                             })
+
+#                     print(f"[Dataset Loader] Demo {demo_key} (Type B={is_type_b}) loaded {repeat_times} times.")
+                        
+#         print(f"[Dataset] Loaded {len(self.indices)} samples.")
+
+#     def __len__(self): return len(self.indices)
+
+#     def __getitem__(self, idx):
+#         meta = self.indices[idx]
+#         demo_key = meta['demo_key']
+#         current_t = meta['current_t']
+        
+#         # 准备数据容器
+#         main_frames = None
+#         wrist_frames = None
+#         state_raw = None
+#         teacher_siglip_tensor = None
+#         future_exo_target = None
+        
+#         # 确定历史窗口
+#         history_start = max(0, current_t - self.history_len + 1)
+#         history_end = current_t + 1
+#         valid_len = history_end - history_start
+        
+#         # 计算采样索引
+#         offsets = np.linspace(0, valid_len - 1, self.window_size).astype(int)
+#         global_indices = history_start + offsets
+#         global_indices = np.sort(global_indices)
+
+#         # =========================================================
+#         # 🟢 分支 A: 内存极速读取 (In-Memory)
+#         # =========================================================
+#         if self.in_memory:
+#             demo_data = self.cache[demo_key]
+#             demo_len = demo_data['qpos'].shape[0] # 使用 qpos 长度作为基准
+            
+#             # Numpy 支持重复索引，直接读取即可
+#             main_frames = demo_data['main_img'][global_indices]
+#             wrist_frames = demo_data['wrist_img'][global_indices]
+            
+#             # State (从 current_t 开始)
+#             # RDT 需要: State(t) + Action(t...t+H)
+#             # 这里统一从 qpos 读取
+#             state_range_end = min(current_t + self.pred_horizon + 1, demo_len)
+#             state_raw = demo_data['qpos'][current_t : state_range_end]
+
+#             # Teacher
+#             if meta['has_teacher']:
+#                 # SigLIP: 取当前帧
+#                 teacher_siglip_tensor = torch.from_numpy(demo_data['teacher_siglip'][current_t]).float()
+                
+#                 # Future Exo: 稀疏采样
+#                 feats = []
+#                 for offset in self.future_offsets:
+#                     target_idx = min(current_t + offset, demo_len - 1)
+#                     feats.append(torch.from_numpy(demo_data['teacher_exo'][target_idx]).float())
+#                 future_exo_target = torch.stack(feats)
+
+
+        
+#         # =========================================================
+#         # 🔵 分支 B: 硬盘读取 (Disk - 兼容旧逻辑)
+#         # =========================================================
+#         else:
+#             with h5py.File(self.hdf5_path, 'r') as f:
+#                 demo_grp = f['data'][demo_key]
+#                 demo_len = demo_grp['actions'].shape[0]
+                
+#                 main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
+#                 wrist_key = 'robot0_eye_in_hand_image'
+                
+#                 # h5py 不支持重复索引，需去重
+#                 unique_indices, inverse_indices = np.unique(global_indices, return_inverse=True)
+#                 unique_main = demo_grp['obs'][main_key][unique_indices]
+#                 unique_wrist = demo_grp['obs'][wrist_key][unique_indices]
+                
+#                 main_frames = unique_main[inverse_indices]
+#                 wrist_frames = unique_wrist[inverse_indices]
+                
+#                 state_range_end = min(current_t + self.pred_horizon + 1, demo_len)
+#                 state_raw = demo_grp['obs']['robot0_joint_pos'][current_t : state_range_end]
+                
+#                 if meta['has_teacher']:
+#                     teacher_siglip_tensor = torch.from_numpy(demo_grp['teacher_siglip'][current_t]).float()
+#                     feats = []
+#                     for offset in self.future_offsets:
+#                         target_idx = min(current_t + offset, demo_len - 1)
+#                         feats.append(torch.from_numpy(demo_grp['teacher_exo'][target_idx]).float())
+#                     future_exo_target = torch.stack(feats)
+
+#             print("从内存读取失败，改为硬盘读取。")
+
+#         # =========================================================
+#         # 🟡 公共处理逻辑 (Tensor转换与归一化)
+#         # =========================================================
+        
+#         # 1. 视频归一化
+#         # [6, H, W, 3] -> [6, 3, H, W] -> Normalize
+#         main_t = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0
+#         wrist_t = torch.tensor(wrist_frames).float().permute(0, 3, 1, 2) / 255.0
+        
+#         main_t = self.normalize(main_t)
+#         wrist_t = self.normalize(wrist_t)
+        
+#         # [2, 3, 6, H, W]
+#         video = torch.stack([main_t, wrist_t], dim=0).transpose(1, 2)
+
+#         # 2. 状态补齐与归一化
+#         target_len = self.pred_horizon + 1
+#         if state_raw.shape[0] < target_len:
+#             pad_len = target_len - state_raw.shape[0]
+#             # 使用最后一帧填充
+#             state_raw = np.concatenate([state_raw, np.tile(state_raw[-1:], (pad_len, 1))], axis=0)
+            
+#         state_norm = (torch.tensor(state_raw).float() - self.action_mean) / self.action_std
+        
+#         # 分离 Current State 和 Action Target
+#         # state_input_expanded: [6, 8] (复制当前状态以适配旧接口)
+#         state_input_expanded = state_norm[0].unsqueeze(0).repeat(self.window_size, 1)
+#         action_target = state_norm[1:] # [64, 8]
+
+#         # # 3. Anchor (First Frame)
+#         # curr_idx = int(demo_key.split('_')[1])
+#         # anchor_key = f"demo_{(curr_idx//5)*5}"
+        
+#         # if anchor_key in self.anchor_bank:
+#         #     first_frame = self.anchor_bank[anchor_key]
+#         #     # 确保 Anchor 也被归一化 (如果 Bank 里存的是 Raw 0-1)
+#         #     # 这里的 anchor_bank 在 init 时已经 /255.0 了，但还没 Normalize
+#         #     # 简单起见，我们在使用时做 Normalize，或者确保 init 里不做
+#         #     # 根据 init 代码：self.anchor_bank 存的是 /255.0 后的。
+#         #     # 所以这里应用 Normalize
+#         #     first_frame = torch.stack([
+#         #         self.normalize(first_frame[0]), 
+#         #         self.normalize(first_frame[1])
+#         #     ], dim=0)
+#         # else:
+#         #     # Fallback (使用当前序列首帧)
+#         #     if self.in_memory:
+#         #         # 再次从 Cache 取首帧 (indices=0)
+#         #         m0 = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
+#         #         w0 = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
+#         #     else:
+#         #         # 极端情况的 fallback，暂不处理 h5py 打开，直接用当前 batch 的第一帧近似
+#         #         m0 = main_t[0] # 已经是 Norm 过的了
+#         #         w0 = wrist_t[0]
+#         #         # 注意：m0 w0 已经是 Normalized 的了，不需要再做
+#         #         first_frame = torch.stack([m0, w0], dim=0)
+#         #         # 跳过下面的 Normalize
+            
+#         #     if 'first_frame' not in locals():
+#         #         first_frame = torch.stack([self.normalize(m0), self.normalize(w0)], dim=0)
+
+
+
+#         # ✅ 改为：无论是不是 Type A，都用自己的首帧
+#         # (保持你现有的 fallback 逻辑，并确保归一化)
+#         if self.in_memory:
+#             m0_raw = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
+#             w0_raw = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
+#         else:
+#             # ... 从 h5py 读取第 0 帧 ...
+#             pass
+
+#         first_frame = torch.stack([self.normalize(m0_raw), self.normalize(w0_raw)], dim=0)
+
+
+
+
+
+#         # 4. Teacher 默认值填充
+#         if teacher_siglip_tensor is None:
+#             teacher_siglip = torch.zeros(self.window_size, 1152)
+#             future_exo_target = torch.zeros(len(self.future_offsets), 1152)
+#         else:
+#             teacher_siglip = teacher_siglip_tensor.unsqueeze(0).repeat(self.window_size, 1)
+            
+#         teacher_exo_legacy = torch.zeros(self.window_size, 1152)
+
+#         # 5. Tokenize Instruction
+#         text_tokens = self.tokenizer(meta['instruction'], return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids.squeeze(0)
+
+#         return {
+#             "video": video,
+#             "state": state_input_expanded,
+#             "action_target": action_target,
+#             "text_tokens": text_tokens,
+#             "first_frame": first_frame,
+#             "teacher_siglip": teacher_siglip,
+#             "teacher_exo": teacher_exo_legacy,
+#             "future_exo_target": future_exo_target
+#         }
+
+
 import torch
 from torch.utils.data import Dataset
 import h5py
@@ -456,10 +822,10 @@ from tqdm import tqdm
 class RobotDataset(Dataset):
     def __init__(self, hdf5_path, in_memory=True, 
                  window_size=6,         # 实际输入给模型的帧数
-                 history_len=500,       # 模拟的历史视野长度 (从中采样 window_size 帧)
+                 history_len=500,       # 模拟的历史视野长度
                  pred_horizon=64,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/130dataset_stats.json"): 
+                 stats_path="/yanghaochuan/data/131dataset_stats.json"): # 请确保指向最新的 stats 文件
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
@@ -493,9 +859,8 @@ class RobotDataset(Dataset):
         self.action_std = torch.tensor(stats['action_std']).float()
         self.action_std = torch.maximum(self.action_std, torch.tensor(1e-2))
         
-        # === 3. 扫描数据结构 & Anchor ===
+        # === 3. 扫描数据结构 & 预加载 ===
         self.indices = []
-        self.anchor_bank = {}
         self.cache = {} # 内存缓存
 
         print(f"[Dataset] Scanning HDF5 structure...")
@@ -503,33 +868,14 @@ class RobotDataset(Dataset):
             if 'data' not in f: raise ValueError(f"HDF5结构错误")
             self.demos = list(f['data'].keys())
             
-            # --- 3.1 收集 Anchors (Type B) ---
-            for demo_key in self.demos:
-                demo_grp = f['data'][demo_key]
-                # 兼容旧数据的 Type B 判定
-                data_type = demo_grp.attrs.get("data_type", None)
-                if data_type is None: 
-                    idx = int(demo_key.split('_')[1])
-                    if idx % 5 == 0: data_type = "type_b"
-                
-                if data_type == "type_b":
-                    main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
-                    wrist_key = 'robot0_eye_in_hand_image'
-                    if main_key in demo_grp['obs']:
-                        m0 = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
-                        w0 = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
-                        # 存入 Anchor Bank (注意：这里暂未归一化，使用时再处理，或者在此处统一)
-                        # 为了统一，我们在 __getitem__ 处统一做 Normalize
-                        self.anchor_bank[demo_key] = torch.stack([m0, w0], dim=0)
-
-            # --- 3.2 暴力预加载到内存 (IO Boost) ---
+            # --- 3.1 暴力预加载到内存 (IO Boost) ---
             if self.in_memory:
                 print(f"📥 [IO Boost] Loading ALL data to RAM (Total: {len(self.demos)} demos)...")
                 for demo_key in tqdm(self.demos):
                     grp = f['data'][demo_key]
                     cache_item = {}
                     
-                    # 自动识别 Main Camera Key
+                    # 自动识别 Key
                     main_key = 'agentview_image' if 'agentview_image' in grp['obs'] else 'agentview_rgb'
                     wrist_key = 'robot0_eye_in_hand_image'
 
@@ -539,86 +885,80 @@ class RobotDataset(Dataset):
                     
                     # 读取状态与动作
                     cache_item['qpos'] = grp['obs']['robot0_joint_pos'][:]
-                    # 如果有显式的 actions dataset 就读，没有则后续通过 qpos 切片
-                    if 'actions' in grp:
-                        cache_item['actions'] = grp['actions'][:]
                     
-                    # 读取 Teacher 特征
+                    # 读取 Teacher 特征 (如果存在)
                     if 'teacher_siglip' in grp:
                         cache_item['teacher_siglip'] = grp['teacher_siglip'][:]
                     if 'teacher_exo' in grp:
                         cache_item['teacher_exo'] = grp['teacher_exo'][:]
                     
+                    # 读取 Instruction (直接读取 attribute)
+                    instr = grp.attrs.get('language_instruction', 'do nothing')
+                    if isinstance(instr, bytes): instr = instr.decode('utf-8')
+                    cache_item['instruction'] = instr
+
                     self.cache[demo_key] = cache_item
                 print("✅ Dataset successfully loaded to RAM!")
 
-            # --- 3.3 构建样本索引 ---
+            # --- 3.2 构建样本索引 (Apply Weighting Strategy) ---
+            print(f"⚖️  Applying Data Balancing Strategy (80:80:80)...")
+            
+            count_type_a = 0
+            count_type_b = 0
+            count_type_c = 0
+
             for demo_key in self.demos:
-                # 如果在内存里，直接查缓存；否则查文件
+                # 获取长度信息
                 if self.in_memory:
-                    # 使用缓存中的长度信息
-                    if 'actions' in self.cache[demo_key]:
-                        total_len = self.cache[demo_key]['actions'].shape[0]
-                    else:
-                        total_len = self.cache[demo_key]['qpos'].shape[0] # Fallback
+                    total_len = self.cache[demo_key]['qpos'].shape[0]
+                    instr = self.cache[demo_key]['instruction']
+                    has_teacher = 'teacher_siglip' in self.cache[demo_key]
                 else:
                     demo_grp = f['data'][demo_key]
-                    if 'actions' not in demo_grp: continue
-                    total_len = demo_grp['actions'].shape[0]
-
-                # 只要剩余长度够预测未来即可
-                if total_len > self.pred_horizon:
-                    # 获取指令 (指令通常很短，暂不缓存，每次读取开销可忽略，或者存入 meta)
-                    # 为简单起见，这里还是每次读 attributes，或者如果你想极致优化，也可以缓存指令
-                    if self.in_memory:
-                        # HDF5 attributes 无法离线缓存，这里我们偷个懒，只缓存数据
-                        # 实际运行时 Instruction 读取很快
-                        pass 
-                    
-                    # 为了获取 instruction，如果是 disk mode 必须读 file
-                    # 如果是 memory mode，我们这里依然需要 file handle 来读 attrs
-                    # 但 dataset scan 只跑一次，所以没关系
-                    demo_grp = f['data'][demo_key]
+                    if 'actions' not in demo_grp and 'robot0_joint_pos' not in demo_grp['obs']: continue
+                    total_len = demo_grp['obs']['robot0_joint_pos'].shape[0]
                     instr = demo_grp.attrs.get('language_instruction', 'do nothing')
                     if isinstance(instr, bytes): instr = instr.decode('utf-8')
-                    
-                    has_teacher = False
-                    if self.in_memory:
-                        has_teacher = 'teacher_siglip' in self.cache[demo_key]
-                    else:
-                        has_teacher = 'teacher_siglip' in demo_grp
-                    
-                    # # 遍历每一个时间步
-                    # for i in range(total_len - self.pred_horizon): 
-                    #     self.indices.append({
-                    #         'demo_key': demo_key, 
-                    #         'current_t': i, 
-                    #         'instruction': instr, 
-                    #         'has_teacher': has_teacher
-                    #     })
-                    # 1. 判定当前 Demo 是否为 Type B (初始位置固定的数据)
-                    # 假设你的命名规则是 demo_0, demo_5, demo_10... 是 Type B
+                    has_teacher = 'teacher_siglip' in demo_grp
+
+                if total_len <= self.pred_horizon: continue
+
+                # === 关键：权重分配逻辑 ===
+                try:
                     curr_idx = int(demo_key.split('_')[1])
-                    is_type_b = (curr_idx % 5 == 0) 
+                except:
+                    curr_idx = 0 # Fallback
 
-                    # 2. 设置重复次数
-                    # Type B (20条) 重复 4 次 -> 等效 80 条
-                    # Type A (80条) 重复 1 次 -> 等效 80 条
-                    # 这样总比例接近 1:1
-                    repeat_times = 4 if is_type_b else 1
+                repeat_times = 1
+                
+                if curr_idx < 100:
+                    # === 旧数据 (0-99) ===
+                    if curr_idx % 5 == 0:
+                        # Type B (20条): x4 -> 80
+                        repeat_times = 4
+                        count_type_b += 1
+                    else:
+                        # Type A (80条): x1 -> 80
+                        repeat_times = 1
+                        count_type_a += 1
+                else:
+                    # === 新数据 (>=100) ===
+                    # Type C (40条): x2 -> 80
+                    repeat_times = 2
+                    count_type_c += 1
 
-                    for _ in range(repeat_times):  # <--- 🟢 新增循环：实现过采样
-                        for i in range(total_len - self.pred_horizon): 
-                            self.indices.append({
-                                'demo_key': demo_key, 
-                                'current_t': i, 
-                                'instruction': instr, 
-                                'has_teacher': has_teacher
-                            })
-
-                    print(f"[Dataset Loader] Demo {demo_key} (Type B={is_type_b}) loaded {repeat_times} times.")
-                        
-        print(f"[Dataset] Loaded {len(self.indices)} samples.")
+                # 过采样循环
+                for _ in range(repeat_times):
+                    for i in range(total_len - self.pred_horizon): 
+                        self.indices.append({
+                            'demo_key': demo_key, 
+                            'current_t': i, 
+                            'instruction': instr, 
+                            'has_teacher': has_teacher
+                        })
+            
+            print(f"📊 Demos Count -> Type A: {count_type_a} | Type B: {count_type_b} | Type C: {count_type_c}")
+            print(f"📦 Total Samples (Weighted): {len(self.indices)}")
 
     def __len__(self): return len(self.indices)
 
@@ -649,39 +989,36 @@ class RobotDataset(Dataset):
         # =========================================================
         if self.in_memory:
             demo_data = self.cache[demo_key]
-            demo_len = demo_data['qpos'].shape[0] # 使用 qpos 长度作为基准
+            demo_len = demo_data['qpos'].shape[0]
             
-            # Numpy 支持重复索引，直接读取即可
+            # Numpy 支持重复索引
             main_frames = demo_data['main_img'][global_indices]
             wrist_frames = demo_data['wrist_img'][global_indices]
             
-            # State (从 current_t 开始)
-            # RDT 需要: State(t) + Action(t...t+H)
-            # 这里统一从 qpos 读取
+            # State
             state_range_end = min(current_t + self.pred_horizon + 1, demo_len)
             state_raw = demo_data['qpos'][current_t : state_range_end]
 
             # Teacher
             if meta['has_teacher']:
-                # SigLIP: 取当前帧
                 teacher_siglip_tensor = torch.from_numpy(demo_data['teacher_siglip'][current_t]).float()
-                
-                # Future Exo: 稀疏采样
                 feats = []
                 for offset in self.future_offsets:
                     target_idx = min(current_t + offset, demo_len - 1)
                     feats.append(torch.from_numpy(demo_data['teacher_exo'][target_idx]).float())
                 future_exo_target = torch.stack(feats)
+                
+            # 首帧 (Anchor) - 直接取缓存的第0帧
+            m0_raw = torch.tensor(demo_data['main_img'][0]).float().permute(2, 0, 1) / 255.0
+            w0_raw = torch.tensor(demo_data['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
 
-
-        
         # =========================================================
-        # 🔵 分支 B: 硬盘读取 (Disk - 兼容旧逻辑)
+        # 🔵 分支 B: 硬盘读取 (Disk - Fallback)
         # =========================================================
         else:
             with h5py.File(self.hdf5_path, 'r') as f:
                 demo_grp = f['data'][demo_key]
-                demo_len = demo_grp['actions'].shape[0]
+                demo_len = demo_grp['obs']['robot0_joint_pos'].shape[0]
                 
                 main_key = 'agentview_image' if 'agentview_image' in demo_grp['obs'] else 'agentview_rgb'
                 wrist_key = 'robot0_eye_in_hand_image'
@@ -704,88 +1041,38 @@ class RobotDataset(Dataset):
                         target_idx = min(current_t + offset, demo_len - 1)
                         feats.append(torch.from_numpy(demo_grp['teacher_exo'][target_idx]).float())
                     future_exo_target = torch.stack(feats)
-
-            print("从内存读取失败，改为硬盘读取。")
+                
+                m0_raw = torch.tensor(demo_grp['obs'][main_key][0]).float().permute(2, 0, 1) / 255.0
+                w0_raw = torch.tensor(demo_grp['obs'][wrist_key][0]).float().permute(2, 0, 1) / 255.0
 
         # =========================================================
-        # 🟡 公共处理逻辑 (Tensor转换与归一化)
+        # 🟡 公共处理逻辑
         # =========================================================
         
         # 1. 视频归一化
-        # [6, H, W, 3] -> [6, 3, H, W] -> Normalize
         main_t = torch.tensor(main_frames).float().permute(0, 3, 1, 2) / 255.0
         wrist_t = torch.tensor(wrist_frames).float().permute(0, 3, 1, 2) / 255.0
         
         main_t = self.normalize(main_t)
         wrist_t = self.normalize(wrist_t)
         
-        # [2, 3, 6, H, W]
-        video = torch.stack([main_t, wrist_t], dim=0).transpose(1, 2)
+        video = torch.stack([main_t, wrist_t], dim=0).transpose(1, 2) # [2, 3, 6, H, W]
 
         # 2. 状态补齐与归一化
         target_len = self.pred_horizon + 1
         if state_raw.shape[0] < target_len:
             pad_len = target_len - state_raw.shape[0]
-            # 使用最后一帧填充
             state_raw = np.concatenate([state_raw, np.tile(state_raw[-1:], (pad_len, 1))], axis=0)
             
         state_norm = (torch.tensor(state_raw).float() - self.action_mean) / self.action_std
         
-        # 分离 Current State 和 Action Target
-        # state_input_expanded: [6, 8] (复制当前状态以适配旧接口)
         state_input_expanded = state_norm[0].unsqueeze(0).repeat(self.window_size, 1)
-        action_target = state_norm[1:] # [64, 8]
+        action_target = state_norm[1:]
 
-        # # 3. Anchor (First Frame)
-        # curr_idx = int(demo_key.split('_')[1])
-        # anchor_key = f"demo_{(curr_idx//5)*5}"
-        
-        # if anchor_key in self.anchor_bank:
-        #     first_frame = self.anchor_bank[anchor_key]
-        #     # 确保 Anchor 也被归一化 (如果 Bank 里存的是 Raw 0-1)
-        #     # 这里的 anchor_bank 在 init 时已经 /255.0 了，但还没 Normalize
-        #     # 简单起见，我们在使用时做 Normalize，或者确保 init 里不做
-        #     # 根据 init 代码：self.anchor_bank 存的是 /255.0 后的。
-        #     # 所以这里应用 Normalize
-        #     first_frame = torch.stack([
-        #         self.normalize(first_frame[0]), 
-        #         self.normalize(first_frame[1])
-        #     ], dim=0)
-        # else:
-        #     # Fallback (使用当前序列首帧)
-        #     if self.in_memory:
-        #         # 再次从 Cache 取首帧 (indices=0)
-        #         m0 = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
-        #         w0 = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
-        #     else:
-        #         # 极端情况的 fallback，暂不处理 h5py 打开，直接用当前 batch 的第一帧近似
-        #         m0 = main_t[0] # 已经是 Norm 过的了
-        #         w0 = wrist_t[0]
-        #         # 注意：m0 w0 已经是 Normalized 的了，不需要再做
-        #         first_frame = torch.stack([m0, w0], dim=0)
-        #         # 跳过下面的 Normalize
-            
-        #     if 'first_frame' not in locals():
-        #         first_frame = torch.stack([self.normalize(m0), self.normalize(w0)], dim=0)
-
-
-
-        # ✅ 改为：无论是不是 Type A，都用自己的首帧
-        # (保持你现有的 fallback 逻辑，并确保归一化)
-        if self.in_memory:
-            m0_raw = torch.tensor(self.cache[demo_key]['main_img'][0]).float().permute(2, 0, 1) / 255.0
-            w0_raw = torch.tensor(self.cache[demo_key]['wrist_img'][0]).float().permute(2, 0, 1) / 255.0
-        else:
-            # ... 从 h5py 读取第 0 帧 ...
-            pass
-
+        # 3. Anchor (First Frame)
         first_frame = torch.stack([self.normalize(m0_raw), self.normalize(w0_raw)], dim=0)
 
-
-
-
-
-        # 4. Teacher 默认值填充
+        # 4. Teacher 默认值
         if teacher_siglip_tensor is None:
             teacher_siglip = torch.zeros(self.window_size, 1152)
             future_exo_target = torch.zeros(len(self.future_offsets), 1152)
@@ -794,7 +1081,7 @@ class RobotDataset(Dataset):
             
         teacher_exo_legacy = torch.zeros(self.window_size, 1152)
 
-        # 5. Tokenize Instruction
+        # 5. Tokenize
         text_tokens = self.tokenizer(meta['instruction'], return_tensors="pt", padding="max_length", max_length=16, truncation=True).input_ids.squeeze(0)
 
         return {

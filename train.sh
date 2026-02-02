@@ -20,7 +20,7 @@ echo "📂 Working Directory: $(pwd)"
 
 # === 3. 解释器与数据路径 (集中配置，方便修改) ===
 PYTHON_EXE="/opt/conda/envs/ego/bin/python"
-DATA_ROOT="/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_binary.hdf5"
+DATA_ROOT="/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_140.hdf5"
 OUTPUT_DIR="/yanghaochuan/checkpoints"
 STAGE_A_CKPT="/yanghaochuan/checkpoints/stageA_final.pt"
 
@@ -35,7 +35,7 @@ echo "🚀 Starting Stage B Training (VideoMAE Distillation)..."
 echo "-----------------------------------------------------------"
 
 # Stage B 输出的最终模型路径 (与 stageB_train.py 代码中的保存名一致)
-STAGE_B_FINAL_PATH="${OUTPUT_DIR}/130stageB_final.pt"
+STAGE_B_FINAL_PATH="${OUTPUT_DIR}/131stageB_final.pt"
 
 $PYTHON_EXE -u train/stageB_train.py \
     --data_root $DATA_ROOT \
