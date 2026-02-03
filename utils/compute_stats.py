@@ -355,29 +355,30 @@ def compute_stats(args):
                 if gripper.ndim == 1: gripper = gripper[:, None]
                 qpos = np.concatenate([qpos, gripper], axis=1)
             
-            # === 权重分配逻辑 (必须与 DataLoader 一致) ===
-            try:
-                curr_idx = int(demo_key.split('_')[1])
-            except:
-                curr_idx = 0 
+            # # === 权重分配逻辑 (必须与 DataLoader 一致) ===
+            # try:
+            #     curr_idx = int(demo_key.split('_')[1])
+            # except:
+            #     curr_idx = 0 
             
-            weight = 1
-            if curr_idx < 100:
-                # 旧数据
-                if curr_idx % 5 == 0:
-                    weight = 4 # Type B
-                    count_type_b += 1
-                else:
-                    weight = 1 # Type A
-                    count_type_a += 1
-            else:
-                # 新数据 (Type C)
-                weight = 2     # Type C
-                count_type_c += 1
+            # weight = 1
+            # if curr_idx < 100:
+            #     # 旧数据
+            #     if curr_idx % 5 == 0:
+            #         weight = 4 # Type B
+            #         count_type_b += 1
+            #     else:
+            #         weight = 1 # Type A
+            #         count_type_a += 1
+            # else:
+            #     # 新数据 (Type C)
+            #     weight = 4     # Type C
+            #     count_type_c += 1
                 
-            # 加权收集
-            for _ in range(weight):
-                all_qpos.append(qpos)
+            # # 加权收集
+            # for _ in range(weight):
+            #     all_qpos.append(qpos)
+            all_qpos.append(qpos)
             
     print(f"📊 Original Counts -> A: {count_type_a} | B: {count_type_b} | C: {count_type_c}")
     print(f"⚖️  Effective Counts -> A: {count_type_a*1} | B: {count_type_b*4} | C: {count_type_c*2}")
@@ -393,39 +394,39 @@ def compute_stats(args):
     print("🏥 SURGICAL STATS CORRECTION (Final Polish)")
     print("="*50)
     
-    # =========================================================
-    # 🟢 [Surgical Correction] 针对特定关节的修复
-    # =========================================================
-    # J2: 保持静默 (0.05)
-    # J3, J5: 修复瞬移 (0.40)
-    # 其他: 默认底线 (0.1)
+    # # =========================================================
+    # # 🟢 [Surgical Correction] 针对特定关节的修复
+    # # =========================================================
+    # # J2: 保持静默 (0.05)
+    # # J3, J5: 修复瞬移 (0.40)
+    # # 其他: 默认底线 (0.1)
     
-    TARGETED_STD = {
-        2: 0.05,  
-        3: 0.40,  
-        5: 0.40,  
-    }
-    DEFAULT_MIN_STD = 0.1 
+    # TARGETED_STD = {
+    #     2: 0.05,  
+    #     3: 0.40,  
+    #     5: 0.40,  
+    # }
+    # DEFAULT_MIN_STD = 0.1 
     
-    for i in range(7):
-        original_std = std[i]
+    # for i in range(7):
+    #     original_std = std[i]
         
-        # 1. 特殊名单
-        if i in TARGETED_STD:
-            target = TARGETED_STD[i]
-            if original_std < target:
-                print(f"   💉 Joint {i} [TARGETED]: Too tight ({original_std:.4f}). BOOSTING to {target:.4f}.")
-                std[i] = target
-            else:
-                print(f"   ✅ Joint {i} [TARGETED]: Original ({original_std:.4f}) is sufficient.")
+    #     # 1. 特殊名单
+    #     if i in TARGETED_STD:
+    #         target = TARGETED_STD[i]
+    #         if original_std < target:
+    #             print(f"   💉 Joint {i} [TARGETED]: Too tight ({original_std:.4f}). BOOSTING to {target:.4f}.")
+    #             std[i] = target
+    #         else:
+    #             print(f"   ✅ Joint {i} [TARGETED]: Original ({original_std:.4f}) is sufficient.")
         
-        # 2. 默认名单
-        else:
-            if original_std < DEFAULT_MIN_STD:
-                print(f"   ⚠️ Joint {i} [DEFAULT]: Too tight ({original_std:.4f}). Clamping to {DEFAULT_MIN_STD}.")
-                std[i] = DEFAULT_MIN_STD
-            else:
-                print(f"   ✅ Joint {i} [DEFAULT]: Healthy ({original_std:.4f}). Keeping original.")
+    #     # 2. 默认名单
+    #     else:
+    #         if original_std < DEFAULT_MIN_STD:
+    #             print(f"   ⚠️ Joint {i} [DEFAULT]: Too tight ({original_std:.4f}). Clamping to {DEFAULT_MIN_STD}.")
+    #             std[i] = DEFAULT_MIN_STD
+    #         else:
+    #             print(f"   ✅ Joint {i} [DEFAULT]: Healthy ({original_std:.4f}). Keeping original.")
 
     # 3. 夹爪归一化修正
     # 强制将物理极值映射到 [-1, 1]
@@ -458,6 +459,6 @@ def compute_stats(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_root', type=str, required=True)
-    parser.add_argument('--save_path', type=str, default='/yanghaochuan/data/131dataset_stats.json')
+    parser.add_argument('--save_path', type=str, default='/yanghaochuan/data/40dataset_stats.json')
     args = parser.parse_args()
     compute_stats(args)

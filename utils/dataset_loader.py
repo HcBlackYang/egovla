@@ -825,7 +825,7 @@ class RobotDataset(Dataset):
                  history_len=500,       # 模拟的历史视野长度
                  pred_horizon=64,
                  tokenizer_path="/yanghaochuan/models/flan-t5-large",
-                 stats_path="/yanghaochuan/data/131dataset_stats.json"): # 请确保指向最新的 stats 文件
+                 stats_path="/yanghaochuan/data/40dataset_stats.json"): # 请确保指向最新的 stats 文件
         
         self.hdf5_path = hdf5_path
         self.window_size = window_size
@@ -935,7 +935,7 @@ class RobotDataset(Dataset):
                     # === 旧数据 (0-99) ===
                     if curr_idx % 5 == 0:
                         # Type B (20条): x4 -> 80
-                        repeat_times = 4
+                        repeat_times = 1
                         count_type_b += 1
                     else:
                         # Type A (80条): x1 -> 80
@@ -943,8 +943,8 @@ class RobotDataset(Dataset):
                         count_type_a += 1
                 else:
                     # === 新数据 (>=100) ===
-                    # Type C (40条): x2 -> 80
-                    repeat_times = 2
+                    # Type C (40条): x4 -> 160
+                    repeat_times = 1
                     count_type_c += 1
 
                 # 过采样循环

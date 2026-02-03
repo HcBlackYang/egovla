@@ -598,29 +598,29 @@ def train_stage_c(args):
             video_input = video.clone()
             ff_input = ff.clone()
             
-            if rand_val < 0.5:
-                # [Mode A: Inference Simulation] (50%)
-                # 模拟真实推理：Main Camera 丢失，只有 Wrist Camera
-                # 目的：适应部分可观测环境
-                video_input[:, 0] = 0.0 # Mask Main
-                ff_input[:, 0] = 0.0    # Mask First Frame Main
-                mask_type = "Inference_Mode (Wrist Only)"
+            # if rand_val < 0.95:
+            #     # [Mode A: Inference Simulation] (95%)
+            #     # 模拟真实推理：Main Camera 丢失，只有 Wrist Camera
+            #     # 目的：适应部分可观测环境
+            #     video_input[:, 0] = 0.0 # Mask Main
+            #     ff_input[:, 0] = 0.0    # Mask First Frame Main
+            #     mask_type = "Inference_Mode (Wrist Only)"
                 
-            elif rand_val < 0.8:
-                # [Mode B: Total Blindness] (30%)
-                # 模拟全盲：Main + Wrist 全部丢失
-                # 目的：强迫模型必须依赖 State (Proprioception)
-                # 此时 Encoder 输出的 e_t 几乎没有视觉信息，Action 生成全靠 State Injection
-                video_input[:] = 0.0 
-                ff_input[:] = 0.0
-                mask_type = "Blind_Mode (State Only)"
+            # elif rand_val < 1:
+            #     # [Mode B: Total Blindness] (5%)
+            #     # 模拟全盲：Main + Wrist 全部丢失
+            #     # 目的：强迫模型必须依赖 State (Proprioception)
+            #     # 此时 Encoder 输出的 e_t 几乎没有视觉信息，Action 生成全靠 State Injection
+            #     video_input[:] = 0.0 
+            #     ff_input[:] = 0.0
+            #     mask_type = "Blind_Mode (State Only)"
                 
-            else:
-                # [Mode C: Teacher Guidance] (20%)
-                # 全可见：Main + Wrist 都有
-                # 目的：维持 VideoMAE 的特征提取能力，防止灾难性遗忘，并提供语义锚点
-                mask_type = "Teacher_Mode (Full View)"
-
+            # else:
+            #     # [Mode C: Teacher Guidance] (20%)
+            #     # 全可见：Main + Wrist 都有
+            #     # 目的：维持 VideoMAE 的特征提取能力，防止灾难性遗忘，并提供语义锚点
+            #     mask_type = "Teacher_Mode (Full View)"
+            mask_type = "Teacher_Mode (Full View)"
 
             CONSISTENCY_FREQ = 5
 
@@ -733,8 +733,8 @@ def train_stage_c(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # 默认参数仅供参考，建议通过 shell 脚本传入
-    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_140.hdf5')
-    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/131checkpoints_finetune')
+    parser.add_argument('--data_root', type=str, default='/yanghaochuan/data/hdf5/pick_up_the_orange_ball_and_put_it_on_the_plank_40.hdf5')
+    parser.add_argument('--output_dir', type=str, default='/yanghaochuan/22checkpoints_finetune')
     # 默认加载 Stage B (ForeSight Pretrained)
     parser.add_argument('--stage_b_ckpt', type=str, default='/yanghaochuan/checkpoints/131StageB_ForeSight_step_2500.pt')
     parser.add_argument('--batch_size', type=int, default=32)
